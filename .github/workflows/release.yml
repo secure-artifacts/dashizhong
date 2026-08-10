@@ -79,7 +79,7 @@ jobs:
       - name: Install exact Inno Setup package
         shell: pwsh
         run: |
-          choco install innosetup --version=6.4.3 --exact --yes --no-progress --require-checksums
+          choco install innosetup --version=6.4.3 --exact --yes --no-progress --require-checksums --allow-downgrade
           if (-not (Test-Path -LiteralPath "C:\Program Files (x86)\Inno Setup 6\ISCC.exe")) {
             throw "Inno Setup compiler was not installed"
           }
