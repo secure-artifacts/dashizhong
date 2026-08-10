@@ -47,7 +47,9 @@ jobs:
 
       - name: Install pinned binary dependencies
         shell: pwsh
-        run: python -m pip install --disable-pip-version-check --only-binary=:all: --requirement requirements-build.txt
+        run: >-
+          python -m pip install --disable-pip-version-check
+          --only-binary=:all: --requirement requirements-build.txt
 
       - name: Run focused tests
         shell: pwsh
