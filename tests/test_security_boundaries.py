@@ -71,7 +71,13 @@ class CleanerBoundaryTests(unittest.TestCase):
             real_check = cleaner._is_reparse_point
 
             def marked(path: Path) -> bool:
-                return Path(path) == escape or real_check(Path(path))
+                candidate = Path(path)
+                try:
+                    if candidate.samefile(escape):
+                        return True
+                except OSError:
+                    pass
+                return real_check(candidate)
 
             report = cleaner.CleanReport()
             with mock.patch.object(cleaner, "_is_reparse_point", side_effect=marked):
