@@ -135,7 +135,7 @@ class MediaPlayerWindow(QWidget):
         super().__init__(parent)
         self.state = state if isinstance(state, dict) else {}
         self.save_state = save_state
-        self.setWindowTitle("SuperTools - 视频播放器")
+        self.setWindowTitle("Clock/Alarm - 视频播放器")
         self.resize(1000, 700)
         
         self.setStyleSheet("""
@@ -545,7 +545,7 @@ class MediaPlayerWindow(QWidget):
         self.is_playing_state = True
         self.play_btn.setText("⏸")
         self.status_label.setText(f"正在播放: {title}")
-        self.setWindowTitle(f"SuperTools - {title}")
+        self.setWindowTitle(f"Clock/Alarm - {title}")
 
     def _format_time(self, ms: int) -> str:
         s = ms // 1000

@@ -1,4 +1,4 @@
-"""Windows login autostart for Desktop Toolkit."""
+"""Windows login autostart for Clock/Alarm."""
 
 from __future__ import annotations
 
@@ -8,11 +8,11 @@ from pathlib import Path
 
 
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
-APP_NAME = "DesktopToolkit"
+APP_NAME = "ClockAlarm"
 
 
 def _launch_command() -> str:
-    managed_launcher = os.environ.get("DESKTOP_TOOLKIT_LAUNCHER", "").strip()
+    managed_launcher = os.environ.get("CLOCK_ALARM_LAUNCHER", "").strip()
     if managed_launcher:
         launcher = Path(managed_launcher).resolve()
         if launcher.is_file() and launcher.suffix.lower() == ".exe":

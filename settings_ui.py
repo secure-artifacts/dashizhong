@@ -79,7 +79,7 @@ class SettingsDialog(_StyledDialog):
         save_state: Callable[[], None],
         parent=None,
     ) -> None:
-        super().__init__("SuperTools 设置", parent)
+        super().__init__("Clock/Alarm 设置", parent)
         self.state = state
         self.save_state = save_state
 
@@ -88,7 +88,7 @@ class SettingsDialog(_StyledDialog):
 
         general = QGroupBox("常规")
         general_layout = QVBoxLayout(general)
-        self.autostart = QCheckBox("登录 Windows 后自动启动 SuperTools")
+        self.autostart = QCheckBox("登录 Windows 后自动启动 Clock/Alarm")
         self.autostart.setChecked(is_autostart_enabled())
         general_layout.addWidget(self.autostart)
         note = QLabel("默认关闭；只有点击“保存设置”后才会修改开机启动。")

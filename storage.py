@@ -1,4 +1,4 @@
-"""Local JSON state for Desktop Toolkit (no pet data required)."""
+"""Local JSON state for Clock/Alarm (no pet data required)."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 DEFAULT_STATE: dict[str, Any] = {
-    "app_name": "DesktopToolkit",
+    "app_name": "ClockAlarm",
     "prefs": {
         "theme": "dark",
         "autostart": False,
@@ -42,9 +42,9 @@ _WRITE_LOCK = threading.RLock()
 
 
 class JsonStore:
-    def __init__(self, app_name: str = "DesktopToolkit") -> None:
+    def __init__(self, app_name: str = "ClockAlarm") -> None:
         base = os.environ.get("LOCALAPPDATA") or str(Path.home() / ".local" / "share")
-        configured = os.environ.get("DESKTOP_TOOLKIT_DATA_DIR", "")
+        configured = os.environ.get("CLOCK_ALARM_DATA_DIR", "")
         preferred = Path(configured) if configured else Path(base) / app_name
         self.directory = self._select_writable(preferred, app_name)
         self.state_path = self.directory / "state.json"

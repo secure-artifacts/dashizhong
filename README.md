@@ -22,11 +22,11 @@ python main.py
 
 ```bat
 pip install pyinstaller
-python -m PyInstaller --noconfirm DesktopToolkit.spec
+python -m PyInstaller --noconfirm Clock-Alarm.spec
 ```
 
-便携目录为 `dist\SuperTools\`，入口为 `SuperTools.exe`。安装包可用
-`ISCC installer\DesktopToolkit.iss` 构建，产物位于 `dist\release\`。
+便携目录为 `dist\Clock-Alarm\`，入口为 `Clock-Alarm.exe`。安装包可用
+`ISCC installer\Clock-Alarm.iss` 构建，产物位于 `dist\release\`。
 
 ## License
 
@@ -57,16 +57,16 @@ git push origin main
 #### 2. 创建版本 Tag
 
 版本号格式必须为 `v主版本.次版本.修订版本`，并与根目录 `VERSION` 文件一致。
-例如，`VERSION` 为 `1.0.9` 时：
+例如，`VERSION` 为 `1.0.10` 时：
 
 ```bash
-git tag -a v1.0.9 -m "Release version 1.0.9"
+git tag -a v1.0.10 -m "Release version 1.0.10"
 ```
 
 #### 3. 推送 Tag 触发自动构建
 
 ```bash
-git push origin v1.0.9
+git push origin v1.0.10
 ```
 
 推送后，GitHub Actions 会自动测试和构建项目、生成便携包与 Windows 安装包、
@@ -93,8 +93,8 @@ Release 和上传文件。
 然后删除失败的 tag，提交修复后重新创建并推送相同版本 tag：
 
 ```bash
-git tag -d v1.0.9
-git push origin :refs/tags/v1.0.9
-git tag -a v1.0.9 -m "Release version 1.0.9"
-git push origin v1.0.9
+git tag -d v1.0.10
+git push origin :refs/tags/v1.0.10
+git tag -a v1.0.10 -m "Release version 1.0.10"
+git push origin v1.0.10
 ```

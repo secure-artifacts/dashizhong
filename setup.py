@@ -1,4 +1,5 @@
 import sys
+from pathlib import Path
 
 from cx_Freeze import Executable, setup
 
@@ -28,15 +29,15 @@ build_exe_options = {
 base = "gui" if sys.platform == "win32" else None
 
 setup(
-    name="SuperTools",
-    version="1.0",
-    description="SuperTools retained desktop utilities",
+    name="ClockAlarm",
+    version=Path(__file__).with_name("VERSION").read_text(encoding="utf-8").strip(),
+    description="Clock/Alarm retained desktop utilities",
     options={"build_exe": build_exe_options},
     executables=[
         Executable(
             "main.py",
             base=base,
-            target_name="SuperTools.exe",
+            target_name="Clock-Alarm.exe",
             icon="logo.ico",
         )
     ],

@@ -75,7 +75,7 @@ class _Filter(QAbstractNativeEventFilter):
         return False, 0
 
 
-class ToolkitHotkeys:
+class ClockAlarmHotkeys:
     def __init__(
         self,
         *,

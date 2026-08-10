@@ -1,4 +1,4 @@
-"""SuperTools application shell for the retained desktop tools."""
+"""Clock/Alarm application shell for the retained desktop tools."""
 
 from __future__ import annotations
 
@@ -13,16 +13,16 @@ from PyQt6.QtGui import QAction, QIcon
 from PyQt6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon
 
 from cleaner import CleanReport, run_deep_clean_async
-from hotkeys import ToolkitHotkeys
+from hotkeys import ClockAlarmHotkeys
 from skin import bundle_root
 from storage import JsonStore
 from theme import apply_app_palette
 
 
 def _install_exception_hooks() -> Path:
-    log_path = Path(__file__).resolve().parent / "DesktopToolkit-error.log"
+    log_path = Path(__file__).resolve().parent / "Clock-Alarm-error.log"
     if getattr(sys, "frozen", False):
-        log_path = Path(sys.executable).resolve().parent / "DesktopToolkit-error.log"
+        log_path = Path(sys.executable).resolve().parent / "Clock-Alarm-error.log"
 
     def _write(message: str) -> None:
         try:
@@ -52,7 +52,7 @@ def _install_exception_hooks() -> Path:
     return log_path
 
 
-class ToolkitApp(QObject):
+class ClockAlarmApp(QObject):
     clean_finished = pyqtSignal(object)
 
     def __init__(self, app: QApplication) -> None:
@@ -72,7 +72,7 @@ class ToolkitApp(QObject):
 
         self.tray = self._make_tray()
         screenshot_cfg = self.store.state.get("screenshot") or {}
-        self.hotkeys = ToolkitHotkeys(
+        self.hotkeys = ClockAlarmHotkeys(
             open_hub=self.show_world_clock,
             shot_region=self.start_screenshot_region,
             hub_combo="Ctrl+Alt+T",
@@ -86,7 +86,7 @@ class ToolkitApp(QObject):
         self.alarm_timer = QTimer(self)
         self.alarm_timer.timeout.connect(self._alarm_tick)
         self.alarm_timer.start(1000)
-        self.store.append_log("login", "SuperTools started")
+        self.store.append_log("login", "Clock/Alarm started")
         QTimer.singleShot(200, self.show_world_clock)
 
     def _cb(self) -> SimpleNamespace:
@@ -125,7 +125,7 @@ class ToolkitApp(QObject):
         quit_action.triggered.connect(self.quit)
         menu.addAction(quit_action)
         tray.setContextMenu(menu)
-        tray.setToolTip("SuperTools")
+        tray.setToolTip("Clock/Alarm")
         tray.activated.connect(self._tray_activated)
         tray.show()
         return tray
@@ -367,15 +367,15 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
     app.setStyle("Fusion")
-    app.setApplicationName("SuperTools")
+    app.setApplicationName("Clock/Alarm")
     logo = bundle_root() / "logo.png"
     if logo.exists():
         app.setWindowIcon(QIcon(str(logo)))
     try:
-        ToolkitApp(app)
+        ClockAlarmApp(app)
     except Exception as exc:
         traceback.print_exc()
-        QMessageBox.critical(None, "SuperTools", f"启动失败：{exc}")
+        QMessageBox.critical(None, "Clock/Alarm", f"启动失败：{exc}")
         return 1
     return app.exec()
 

@@ -17,7 +17,7 @@ dist/
 release-assets/
 offline-release*/
 test-dist/
-DesktopToolkitData/
+ClockAlarmData/
 *.spec.bak
 
 # Local state / secrets
@@ -36,7 +36,7 @@ Desktop.ini
 .DS_Store
 
 # Error dumps
-DesktopToolkit-error.log
+Clock-Alarm-error.log
 
 # Local release notes / private drafts
 RELEASE-NOTES*.md

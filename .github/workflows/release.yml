@@ -58,9 +58,9 @@ jobs:
       - name: Build with PyInstaller
         shell: pwsh
         run: |
-          python -m PyInstaller --noconfirm --clean DesktopToolkit.spec
-          if (-not (Test-Path -LiteralPath "dist\SuperTools\SuperTools.exe")) {
-            throw "Build failed: dist\SuperTools\SuperTools.exe is missing"
+          python -m PyInstaller --noconfirm --clean Clock-Alarm.spec
+          if (-not (Test-Path -LiteralPath "dist\Clock-Alarm\Clock-Alarm.exe")) {
+            throw "Build failed: dist\Clock-Alarm\Clock-Alarm.exe is missing"
           }
 
       - name: Package portable ZIP
@@ -70,9 +70,9 @@ jobs:
         run: |
           $releaseDir = Join-Path $PWD "release-assets"
           New-Item -ItemType Directory -Path $releaseDir | Out-Null
-          $zipName = "DesktopToolkit-$env:VERSION-windows-portable.zip"
+          $zipName = "Clock-Alarm-$env:VERSION-windows-portable.zip"
           $zipPath = Join-Path $releaseDir $zipName
-          Compress-Archive -LiteralPath "dist\SuperTools" -DestinationPath $zipPath -CompressionLevel Optimal
+          Compress-Archive -LiteralPath "dist\Clock-Alarm" -DestinationPath $zipPath -CompressionLevel Optimal
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $zipPath).Hash.ToLowerInvariant()
           "$hash  $zipName" | Set-Content -LiteralPath "$zipPath.sha256" -Encoding ascii
 
@@ -92,9 +92,9 @@ jobs:
         run: |
           $compiler = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
           $repoUrl = "https://github.com/$env:REPOSITORY"
-          & $compiler "/DMyAppVersion=$env:VERSION" "/DMyAppURL=$repoUrl" "installer\DesktopToolkit.iss"
+          & $compiler "/DMyAppVersion=$env:VERSION" "/DMyAppURL=$repoUrl" "installer\Clock-Alarm.iss"
           if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE" }
-          $setupName = "DesktopToolkit-$env:VERSION-windows-setup.exe"
+          $setupName = "Clock-Alarm-$env:VERSION-windows-setup.exe"
           $setupPath = Join-Path $PWD "dist\release\$setupName"
           if (-not (Test-Path -LiteralPath $setupPath)) { throw "Setup is missing: $setupPath" }
           $releaseDir = Join-Path $PWD "release-assets"
@@ -136,4 +136,4 @@ jobs:
           files: release-assets/*
           fail_on_unmatched_files: true
           generate_release_notes: true
-          name: Desktop Toolkit ${{ needs.build.outputs.version }}
+          name: Clock/Alarm ${{ needs.build.outputs.version }}

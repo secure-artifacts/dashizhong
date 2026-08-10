@@ -4,7 +4,7 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 
-internal static class SuperToolsLauncher
+internal static class ClockAlarmLauncher
 {
     [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
     private static extern IntPtr LoadLibrary(string path);
@@ -31,7 +31,7 @@ internal static class SuperToolsLauncher
         string libraryRoot = Path.Combine(runtimeRoot, "lib");
         string mainScript = Path.Combine(appRoot, "main.py");
         string pythonDll = Path.Combine(runtimeRoot, "python314.dll");
-        string launcher = Path.Combine(root, "SuperTools.exe");
+        string launcher = Path.Combine(root, "Clock-Alarm.exe");
 
         if (!File.Exists(mainScript) || !File.Exists(pythonDll))
         {
@@ -59,7 +59,7 @@ internal static class SuperToolsLauncher
             "QT_PLUGIN_PATH",
             Path.Combine(libraryRoot, "PyQt6", "Qt6", "plugins")
         );
-        Environment.SetEnvironmentVariable("DESKTOP_TOOLKIT_LAUNCHER", launcher);
+        Environment.SetEnvironmentVariable("CLOCK_ALARM_LAUNCHER", launcher);
 
         IntPtr module = LoadLibrary(pythonDll);
         if (module == IntPtr.Zero)

@@ -710,7 +710,7 @@ class FloatingRecorderBoard(QWidget):
         path_row = QHBoxLayout()
         path_row.addWidget(QLabel("保存目录"))
         self.txt_save_dir = QLineEdit()
-        default_dir = str(Path.home() / "Videos" / "DesktopToolkitRecordings")
+        default_dir = str(Path.home() / "Videos" / "ClockAlarmRecordings")
         self.txt_save_dir.setText(default_dir)
         self.txt_save_dir.setPlaceholderText("录制结束后的默认保存文件夹")
         btn_dir = QPushButton("浏览…", objectName="soft")

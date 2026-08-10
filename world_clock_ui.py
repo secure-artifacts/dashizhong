@@ -1158,7 +1158,7 @@ class AlarmRingingDialog(QDialog):
     def __init__(self, alarm_data: dict, parent=None):
         super().__init__(parent)
         self.alarm_data = alarm_data
-        self.setWindowTitle("闹钟提醒 - SuperTools")
+        self.setWindowTitle("闹钟提醒 - Clock/Alarm")
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint

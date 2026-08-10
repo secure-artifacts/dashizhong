@@ -102,11 +102,11 @@ class ConsentAndLifecyclePolicyTests(unittest.TestCase):
 
     def test_packaged_launcher_is_the_only_autostart_command(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            launcher = Path(temp_dir) / "SuperTools.exe"
+            launcher = Path(temp_dir) / "Clock-Alarm.exe"
             launcher.write_bytes(b"MZ")
             with mock.patch.dict(
                 os.environ,
-                {"DESKTOP_TOOLKIT_LAUNCHER": str(launcher)},
+                {"CLOCK_ALARM_LAUNCHER": str(launcher)},
                 clear=False,
             ):
                 self.assertEqual(
@@ -127,7 +127,7 @@ class ConsentAndLifecyclePolicyTests(unittest.TestCase):
         self.assertIn("host.show_settings()", clock_source)
 
     def test_installer_does_not_create_autostart_without_app_consent(self) -> None:
-        source = (ROOT / "installer" / "DesktopToolkit.iss").read_text(
+        source = (ROOT / "installer" / "Clock-Alarm.iss").read_text(
             encoding="utf-8"
         )
         self.assertNotIn("Tasks: autostart", source)
@@ -204,7 +204,7 @@ class ReleaseBoundaryTests(unittest.TestCase):
         self.assertIn("$env:RELEASE_TAG -match", source)
 
     def test_offline_launcher_has_no_absolute_development_path(self) -> None:
-        source = (ROOT / "launcher" / "SuperToolsLauncher.cs").read_text(
+        source = (ROOT / "launcher" / "ClockAlarmLauncher.cs").read_text(
             encoding="utf-8"
         )
         self.assertNotIn(".gemini", source.lower())

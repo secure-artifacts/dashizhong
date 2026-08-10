@@ -16,7 +16,7 @@ if (-not $Version) {
 }
 $runtimeSourcePath = [IO.Path]::GetFullPath($RuntimeSource)
 $outputRootPath = [IO.Path]::GetFullPath($OutputRoot)
-$portableRoot = Join-Path $outputRootPath "DesktopToolkit-$Version-portable"
+$portableRoot = Join-Path $outputRootPath "Clock-Alarm-$Version-portable"
 
 if (-not (Test-Path -LiteralPath (Join-Path $runtimeSourcePath "python314.dll"))) {
     throw "Runtime source is missing python314.dll: $runtimeSourcePath"
@@ -63,7 +63,7 @@ $zipPath = Join-Path $runtimeOut.FullName "lib\library.zip"
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $bannedModules = @(
-    "__init__supertools.pyc", "__main__supertools.pyc", "__startup__.pyc",
+    "__startup__.pyc",
     "alarm_sounds.pyc", "autostart.pyc", "cleaner.pyc", "cleaner_ui.pyc",
     "download_queue.pyc", "gdrive_client.pyc", "hotkeys.pyc", "hub_ui.pyc",
     "lan_share.pyc", "lan_ui.pyc", "lyrics_engine.pyc", "lyrics_ui.pyc",
@@ -76,7 +76,8 @@ $bannedModules = @(
 $archive = [IO.Compression.ZipFile]::Open($zipPath, [IO.Compression.ZipArchiveMode]::Update)
 try {
     foreach ($entry in @($archive.Entries)) {
-        if ($bannedModules -contains $entry.FullName) {
+        $isLegacyNamedBootstrap = $entry.FullName -match '^__(?:init|main)__[a-z]+\.pyc$'
+        if (($bannedModules -contains $entry.FullName) -or $isLegacyNamedBootstrap) {
             $entry.Delete()
         }
     }
@@ -89,8 +90,8 @@ if (-not (Test-Path -LiteralPath $compiler)) {
     throw "C# compiler not found: $compiler"
 }
 $iconArg = "/win32icon:$(Join-Path $repoRoot 'logo.ico')"
-$outputArg = "/out:$(Join-Path $portableRoot 'SuperTools.exe')"
-$sourceFile = Join-Path $repoRoot "launcher\SuperToolsLauncher.cs"
+$outputArg = "/out:$(Join-Path $portableRoot 'Clock-Alarm.exe')"
+$sourceFile = Join-Path $repoRoot "launcher\ClockAlarmLauncher.cs"
 & $compiler /nologo /target:winexe /platform:x64 /optimize+ $iconArg $outputArg $sourceFile
 if ($LASTEXITCODE -ne 0) {
     throw "Launcher compilation failed with exit code $LASTEXITCODE"
@@ -99,7 +100,14 @@ if ($LASTEXITCODE -ne 0) {
 $remaining = @()
 $check = [IO.Compression.ZipFile]::OpenRead($zipPath)
 try {
-    $remaining = @($check.Entries | Where-Object { $bannedModules -contains $_.FullName } | ForEach-Object FullName)
+    $remaining = @(
+        $check.Entries |
+            Where-Object {
+                ($bannedModules -contains $_.FullName) -or
+                ($_.FullName -match '^__(?:init|main)__[a-z]+\.pyc$')
+            } |
+            ForEach-Object FullName
+    )
 } finally {
     $check.Dispose()
 }
@@ -107,7 +115,7 @@ if ($remaining.Count -gt 0) {
     throw "Removed-feature modules remain in library.zip: $($remaining -join ', ')"
 }
 
-$releaseZip = Join-Path $outputRootPath "DesktopToolkit-$Version-windows-portable.zip"
+$releaseZip = Join-Path $outputRootPath "Clock-Alarm-$Version-windows-portable.zip"
 $sevenZip = "C:\Program Files\7-Zip\7z.exe"
 if (Test-Path -LiteralPath $sevenZip) {
     Push-Location $outputRootPath
