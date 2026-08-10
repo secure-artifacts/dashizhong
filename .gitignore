@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.build-venv/
+.build-tools/
+.env
+*.log
+
+# PyInstaller / release
+build/
+dist/
+release-assets/
+offline-release*/
+test-dist/
+DesktopToolkitData/
+*.spec.bak
+
+# Local state / secrets
+state.json
+*.tmp
+token*.json
+credentials*.json
+
+# IDE / OS
+.idea/
+.vscode/
+.cursor/
+*.swp
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Error dumps
+DesktopToolkit-error.log
+
+# Local release notes / private drafts
+RELEASE-NOTES*.md
+

@@ -1,0 +1,142 @@
+name: Build, attest, and release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Windows release assets
+    runs-on: windows-2025
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout exact tagged commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Validate release tag and source version
+        id: version
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if (-not ($env:RELEASE_TAG -match '^v(?<major>0|[1-9]\d*)\.(?<minor>0|[1-9]\d*)\.(?<patch>0|[1-9]\d*)$')) {
+            throw "Tag must be an exact vMAJOR.MINOR.PATCH version"
+          }
+          $version = $Matches.major + "." + $Matches.minor + "." + $Matches.patch
+          $sourceVersion = (Get-Content -Raw -LiteralPath "VERSION").Trim()
+          if ($sourceVersion -ne $version) {
+            throw "VERSION ($sourceVersion) does not match tag ($version)"
+          }
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Set up exact Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12.10"
+          cache: pip
+          cache-dependency-path: requirements-build.txt
+
+      - name: Install pinned binary dependencies
+        shell: pwsh
+        run: python -m pip install --disable-pip-version-check --only-binary=:all: --requirement requirements-build.txt
+
+      - name: Run focused tests
+        shell: pwsh
+        run: python -B -m unittest discover -s tests -v
+
+      - name: Build with PyInstaller
+        shell: pwsh
+        run: |
+          python -m PyInstaller --noconfirm --clean DesktopToolkit.spec
+          if (-not (Test-Path -LiteralPath "dist\SuperTools\SuperTools.exe")) {
+            throw "Build failed: dist\SuperTools\SuperTools.exe is missing"
+          }
+
+      - name: Package portable ZIP
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $releaseDir = Join-Path $PWD "release-assets"
+          New-Item -ItemType Directory -Path $releaseDir | Out-Null
+          $zipName = "DesktopToolkit-$env:VERSION-windows-portable.zip"
+          $zipPath = Join-Path $releaseDir $zipName
+          Compress-Archive -LiteralPath "dist\SuperTools" -DestinationPath $zipPath -CompressionLevel Optimal
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $zipPath).Hash.ToLowerInvariant()
+          "$hash  $zipName" | Set-Content -LiteralPath "$zipPath.sha256" -Encoding ascii
+
+      - name: Install exact Inno Setup package
+        shell: pwsh
+        run: |
+          choco install innosetup --version=6.4.3 --exact --yes --no-progress --require-checksums
+          if (-not (Test-Path -LiteralPath "C:\Program Files (x86)\Inno Setup 6\ISCC.exe")) {
+            throw "Inno Setup compiler was not installed"
+          }
+
+      - name: Build Windows installer
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          $compiler = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          $repoUrl = "https://github.com/$env:REPOSITORY"
+          & $compiler "/DMyAppVersion=$env:VERSION" "/DMyAppURL=$repoUrl" "installer\DesktopToolkit.iss"
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE" }
+          $setupName = "DesktopToolkit-$env:VERSION-windows-setup.exe"
+          $setupPath = Join-Path $PWD "dist\release\$setupName"
+          if (-not (Test-Path -LiteralPath $setupPath)) { throw "Setup is missing: $setupPath" }
+          $releaseDir = Join-Path $PWD "release-assets"
+          Copy-Item -LiteralPath $setupPath -Destination $releaseDir
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $setupPath).Hash.ToLowerInvariant()
+          "$hash  $setupName" | Set-Content -LiteralPath (Join-Path $releaseDir "$setupName.sha256") -Encoding ascii
+
+      - name: Upload immutable handoff artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-assets-${{ github.sha }}
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 1
+
+  release:
+    name: Attest and publish
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Download exact build output
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-assets-${{ github.sha }}
+          path: release-assets
+
+      - name: Attest every release asset
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: "release-assets/*"
+
+      - name: Create GitHub release from validated tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          test "$RELEASE_TAG" = "v$VERSION"
+          gh release create "$RELEASE_TAG" release-assets/* \
+            --verify-tag \
+            --generate-notes \
+            --latest \
+            --title "Desktop Toolkit $VERSION"
