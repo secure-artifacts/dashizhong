@@ -129,14 +129,9 @@ jobs:
           subject-path: "release-assets/*"
 
       - name: Create GitHub release from validated tag
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.ref_name }}
-          VERSION: ${{ needs.build.outputs.version }}
-        run: |
-          test "$RELEASE_TAG" = "v$VERSION"
-          gh release create "$RELEASE_TAG" release-assets/* \
-            --verify-tag \
-            --generate-notes \
-            --latest \
-            --title "Desktop Toolkit $VERSION"
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          files: release-assets/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          name: Desktop Toolkit ${{ needs.build.outputs.version }}
