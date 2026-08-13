@@ -655,6 +655,116 @@ class ScreenshotEditor(QWidget):
 
         self._dock_hits = hits
 
+    def _draw_icon(self, p: QPainter, icon_id: str, rect: QRect, fg: QColor) -> None:
+        """Vector icon for dock buttons (Flameshot-style recognition)."""
+        p.save()
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        cx, cy = rect.center().x(), rect.center().y()
+        pen = QPen(fg, 2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+        p.setPen(pen)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        if icon_id == "pen":
+            p.drawLine(cx - 8, cy + 8, cx + 8, cy - 8)
+            p.setBrush(fg)
+            p.drawEllipse(QPoint(cx + 8, cy - 8), 3, 3)
+        elif icon_id == "marker":
+            p.setBrush(QColor(fg.red(), fg.green(), fg.blue(), 100))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.drawRoundedRect(cx - 10, cy - 6, 20, 12, 3, 3)
+            p.setPen(pen)
+            p.drawLine(cx - 10, cy + 8, cx + 10, cy + 8)
+        elif icon_id == "arrow":
+            p.drawLine(cx - 10, cy + 8, cx + 8, cy - 8)
+            p.drawLine(cx + 8, cy - 8, cx + 2, cy - 8)
+            p.drawLine(cx + 8, cy - 8, cx + 8, cy - 2)
+        elif icon_id == "rect":
+            p.drawRect(cx - 9, cy - 7, 18, 14)
+        elif icon_id == "ellipse":
+            p.drawEllipse(QPoint(cx, cy), 10, 7)
+        elif icon_id == "text":
+            p.setFont(QFont("Segoe UI", 13, QFont.Weight.Bold))
+            p.drawText(rect, Qt.AlignmentFlag.AlignCenter, "T")
+        elif icon_id == "number":
+            p.setBrush(fg)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.drawEllipse(QPoint(cx, cy), 9, 9)
+            p.setPen(QPen(QColor(15, 23, 42), 2))
+            p.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+            p.drawText(rect, Qt.AlignmentFlag.AlignCenter, "1")
+        elif icon_id == "pixelate":
+            for i in range(3):
+                for j in range(3):
+                    if (i + j) % 2 == 0:
+                        p.fillRect(cx - 9 + i * 6, cy - 9 + j * 6, 5, 5, fg)
+        elif icon_id == "blur":
+            p.setBrush(QColor(fg.red(), fg.green(), fg.blue(), 80))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.drawEllipse(QPoint(cx, cy), 10, 10)
+            p.setBrush(QColor(fg.red(), fg.green(), fg.blue(), 160))
+            p.drawEllipse(QPoint(cx, cy), 5, 5)
+        elif icon_id == "undo":
+            path = QPainterPath()
+            path.moveTo(cx + 6, cy - 6)
+            path.arcTo(cx - 8, cy - 8, 16, 16, 30, 200)
+            p.drawPath(path)
+            p.drawLine(cx - 8, cy - 2, cx - 2, cy - 8)
+            p.drawLine(cx - 8, cy - 2, cx - 2, cy + 2)
+        elif icon_id == "redo":
+            path = QPainterPath()
+            path.moveTo(cx - 6, cy - 6)
+            path.arcTo(cx - 8, cy - 8, 16, 16, 150, -200)
+            p.drawPath(path)
+            p.drawLine(cx + 8, cy - 2, cx + 2, cy - 8)
+            p.drawLine(cx + 8, cy - 2, cx + 2, cy + 2)
+        elif icon_id == "reselect":
+            p.setPen(QPen(fg, 2, Qt.PenStyle.DashLine, Qt.PenCapStyle.SquareCap))
+            p.drawRect(cx - 9, cy - 7, 18, 14)
+            p.setPen(QPen(fg, 3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.SquareCap))
+            for ox, oy, dx, dy in (
+                (-9, -7, 5, 0),
+                (-9, -7, 0, 5),
+                (9, -7, -5, 0),
+                (9, -7, 0, 5),
+                (-9, 7, 5, 0),
+                (-9, 7, 0, -5),
+                (9, 7, -5, 0),
+                (9, 7, 0, -5),
+            ):
+                p.drawLine(cx + ox, cy + oy, cx + ox + dx, cy + oy + dy)
+        elif icon_id == "copy":
+            p.setPen(QPen(fg, 2))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawRoundedRect(cx - 8, cy - 4, 16, 14, 2, 2)
+            p.drawRoundedRect(cx - 4, cy - 9, 8, 6, 2, 2)
+            p.drawLine(cx - 3, cy + 1, cx + 3, cy + 1)
+            p.drawLine(cx - 3, cy + 5, cx + 3, cy + 5)
+        elif icon_id == "save":
+            p.drawRoundedRect(cx - 8, cy - 8, 16, 16, 2, 2)
+            p.drawRect(cx - 4, cy - 8, 8, 6)
+            p.drawLine(cx - 3, cy + 2, cx + 3, cy + 2)
+        elif icon_id == "pin":
+            p.drawEllipse(QPoint(cx, cy - 4), 5, 5)
+            p.drawLine(cx, cy + 1, cx, cy + 9)
+        elif icon_id == "accept":
+            p.setPen(QPen(fg, 3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+            p.drawLine(cx - 7, cy, cx - 2, cy + 6)
+            p.drawLine(cx - 2, cy + 6, cx + 8, cy - 6)
+        elif icon_id == "cancel":
+            p.setPen(QPen(fg, 3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.drawLine(cx - 7, cy - 7, cx + 7, cy + 7)
+            p.drawLine(cx + 7, cy - 7, cx - 7, cy + 7)
+        elif icon_id == "w_minus":
+            p.setPen(QPen(fg, 3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.drawLine(cx - 7, cy, cx + 7, cy)
+        elif icon_id == "w_plus":
+            p.setPen(QPen(fg, 3, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.drawLine(cx - 7, cy, cx + 7, cy)
+            p.drawLine(cx, cy - 7, cx, cy + 7)
+        elif icon_id == "color_more":
+            p.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
+            p.drawText(rect, Qt.AlignmentFlag.AlignCenter, "+")
+        p.restore()
+
     def _paint_dock(self, p: QPainter) -> None:
         if not self._dock_hits:
             self._rebuild_dock()
