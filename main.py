@@ -56,7 +56,7 @@ def _get_video_from_argv() -> str | None:
     import sys
     import os
     for arg in sys.argv[1:]:
-        if arg in ("-B", "-u", "-d") or arg.endswith(".py"):
+        if arg in ("-B", "-u", "-d", "--play") or arg.endswith(".py"):
             continue
         if os.path.exists(arg):
             return os.path.abspath(arg)
@@ -72,6 +72,18 @@ class ClockAlarmApp(QObject):
         super().__init__(app)
         self.app = app
         self.store = JsonStore()
+        media_cfg = self.store.state.get("media")
+        if isinstance(media_cfg, dict) and media_cfg.get("right_click_association"):
+            try:
+                from settings_ui import set_right_click_association
+
+                set_right_click_association(True)
+            except Exception as exc:
+                self.store.append_log(
+                    "context_menu_error",
+                    "Failed to repair the Windows video association",
+                    error=str(exc),
+                )
         self._cleaning = False
         self.recorder_board = None
         self.world_clock_board = None
@@ -225,6 +237,7 @@ class ClockAlarmApp(QObject):
             if not exists:
                 self.media_player_board.playlist.append((title, video_path))
                 self.media_player_board.queue_list.addItem(title)
+                self.media_player_board._persist_playlist()
                 self.media_player_board.play_index(len(self.media_player_board.playlist) - 1)
 
     def show_settings(self) -> None:
@@ -404,6 +417,15 @@ class ClockAlarmApp(QObject):
 
 def main() -> int:
     _install_exception_hooks()
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                "ClockAlarm.DesktopToolkit"
+            )
+        except Exception:
+            pass
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
     app.setStyle("Fusion")
