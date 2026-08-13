@@ -151,7 +151,6 @@ DOCK_ACTION_ROW: list[tuple[str, str, str, str]] = [
     ("redo", "redo", "重做", "action"),
     ("reselect", "reselect", "重选区域", "action"),
     ("copy", "copy", "复制", "action"),
-    ("save", "save", "保存", "action"),
     ("pin", "pin", "钉住", "action"),
     ("accept", "accept", "完成", "action"),
     ("cancel", "cancel", "取消", "action"),
@@ -1584,18 +1583,8 @@ class ScreenshotEditor(QWidget):
                 QMessageBox.information(self, "截图", "请先框选有效区域")
             return
         if act == "copy":
-            QApplication.clipboard().setImage(img)
+            copy_image_to_clipboard(img)
             self._finish_ok(img)
-            return
-        if act == "save":
-            path = self._default_save_dir() / f"shot_{time.strftime('%Y%m%d_%H%M%S')}.png"
-            chosen, _ = QFileDialog.getSaveFileName(
-                self, "保存截图", str(path), "PNG (*.png);;JPEG (*.jpg)"
-            )
-            if chosen:
-                img.save(chosen)
-                self.cfg["last_save"] = chosen
-                self._finish_ok(img)
             return
         if act == "pin":
             pm = QPixmap.fromImage(img)
@@ -1609,7 +1598,7 @@ class ScreenshotEditor(QWidget):
             # auto save + copy image then exit
             path = self._default_save_dir() / f"shot_{time.strftime('%Y%m%d_%H%M%S')}.png"
             img.save(str(path))
-            QApplication.clipboard().setImage(img)
+            copy_image_to_clipboard(img)
             self._finish_ok(img)
             return
 

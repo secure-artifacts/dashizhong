@@ -10,7 +10,9 @@ from PyQt6.QtWidgets import (
     QDialogButtonBox,
     QFormLayout,
     QGroupBox,
+    QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QScrollArea,
     QSpinBox,
@@ -82,9 +84,18 @@ class SettingsDialog(_StyledDialog):
         super().__init__("Clock/Alarm 设置", parent)
         self.state = state
         self.save_state = save_state
+        self.resize(540, 600)
 
-        layout = QVBoxLayout(self)
+        main_layout = QVBoxLayout(self)
+        main_layout.setSpacing(12)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        content_widget = QWidget()
+        layout = QVBoxLayout(content_widget)
         layout.setSpacing(12)
+        layout.setContentsMargins(0, 0, 0, 0)
 
         general = QGroupBox("常规")
         general_layout = QVBoxLayout(general)
@@ -115,7 +126,7 @@ class SettingsDialog(_StyledDialog):
         media_group = QGroupBox("视频播放器")
         media_form = QFormLayout(media_group)
         media_cfg = state.get("media") if isinstance(state.get("media"), dict) else {}
-        self.allow_online = QCheckBox("允许解析在线视频链接和 YouTube")
+        self.allow_online = QCheckBox("允许解析在线视频链接 and YouTube")
         self.allow_online.setChecked(bool(media_cfg.get("allow_online", True)))
         media_form.addRow(self.allow_online)
         self.playlist_limit = QSpinBox()
@@ -127,6 +138,60 @@ class SettingsDialog(_StyledDialog):
         media_form.addRow("单次播放列表上限", self.playlist_limit)
         layout.addWidget(media_group)
 
+        # Global Hotkey Customization Section
+        hotkey_group = QGroupBox("全局快捷键自定义")
+        hotkey_layout = QVBoxLayout(hotkey_group)
+        
+        hotkeys_cfg = state.setdefault("hotkeys_config", {})
+        self.hotkeys_master = QCheckBox("启用全局快捷键功能")
+        self.hotkeys_master.setChecked(bool(hotkeys_cfg.setdefault("enabled", True)))
+        hotkey_layout.addWidget(self.hotkeys_master)
+        
+        hotkey_form = QFormLayout()
+        self.hotkey_enables = {}
+        self.hotkey_inputs = {}
+        
+        hotkey_meta = [
+            ("world_clock", "闹钟 / 时钟 / 倒计时", "Ctrl+Alt+T"),
+            ("screenshot", "区域截图", "Ctrl+Alt+A"),
+            ("recorder", "屏幕录像", "Ctrl+Alt+R"),
+            ("todos", "待办事项", "Ctrl+Alt+D"),
+            ("notes", "便签", "Ctrl+Alt+N"),
+            ("media_player", "视频播放器", "Ctrl+Alt+V"),
+            ("cleaner", "电脑清理", "Ctrl+Alt+C"),
+        ]
+        
+        combos = hotkeys_cfg.setdefault("combos", {})
+        enables = hotkeys_cfg.setdefault("enables", {})
+        
+        for key, name, default_combo in hotkey_meta:
+            row_widget = QWidget()
+            row_layout = QHBoxLayout(row_widget)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(6)
+            
+            enable_chk = QCheckBox("启用")
+            enable_chk.setChecked(bool(enables.setdefault(key, True)))
+            
+            input_edit = QLineEdit()
+            input_edit.setText(str(combos.setdefault(key, default_combo)))
+            input_edit.setPlaceholderText("例如 Ctrl+Alt+A")
+            input_edit.setMinimumWidth(120)
+            
+            row_layout.addWidget(enable_chk)
+            row_layout.addWidget(input_edit)
+            
+            hotkey_form.addRow(name, row_widget)
+            
+            self.hotkey_enables[key] = enable_chk
+            self.hotkey_inputs[key] = input_edit
+            
+        hotkey_layout.addLayout(hotkey_form)
+        layout.addWidget(hotkey_group)
+
+        scroll.setWidget(content_widget)
+        main_layout.addWidget(scroll)
+
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save
             | QDialogButtonBox.StandardButton.Cancel
@@ -135,7 +200,7 @@ class SettingsDialog(_StyledDialog):
         buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
         buttons.accepted.connect(self._save)
         buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        main_layout.addWidget(buttons)
 
     def _save(self) -> None:
         desired_autostart = self.autostart.isChecked()
@@ -162,6 +227,20 @@ class SettingsDialog(_StyledDialog):
         media = self.state.setdefault("media", {})
         media["allow_online"] = self.allow_online.isChecked()
         media["playlist_limit"] = int(self.playlist_limit.value())
+
+        # Save Hotkeys configuration
+        hotkeys_cfg = self.state.setdefault("hotkeys_config", {})
+        hotkeys_cfg["enabled"] = self.hotkeys_master.isChecked()
+        
+        combos = {}
+        enables = {}
+        for key in self.hotkey_inputs:
+            combos[key] = self.hotkey_inputs[key].text().strip()
+            enables[key] = self.hotkey_enables[key].isChecked()
+            
+        hotkeys_cfg["combos"] = combos
+        hotkeys_cfg["enables"] = enables
+
         self.save_state()
         self.accept()
 

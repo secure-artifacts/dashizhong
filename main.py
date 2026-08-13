@@ -71,13 +71,16 @@ class ClockAlarmApp(QObject):
         apply_app_palette(app, mode)
 
         self.tray = self._make_tray()
-        screenshot_cfg = self.store.state.get("screenshot") or {}
-        self.hotkeys = ClockAlarmHotkeys(
-            open_hub=self.show_world_clock,
-            shot_region=self.start_screenshot_region,
-            hub_combo="Ctrl+Alt+T",
-            region_combo=str(screenshot_cfg.get("hotkey_region") or "Ctrl+Alt+A"),
-        )
+        callbacks = {
+            "world_clock": self.show_world_clock,
+            "screenshot": self.start_screenshot_region,
+            "recorder": self.show_recorder_board,
+            "todos": self.show_todos,
+            "notes": self.show_notes,
+            "media_player": self.show_media_player2,
+            "cleaner": self.start_deep_clean,
+        }
+        self.hotkeys = ClockAlarmHotkeys(callbacks=callbacks, state=self.store.state)
 
         self._apply_saved_autostart()
 
@@ -144,10 +147,7 @@ class ClockAlarmApp(QObject):
         start_screenshot(state=self.store.state)
 
     def rebind_screenshot_hotkeys(self) -> str:
-        screenshot_cfg = self.store.state.setdefault("screenshot", {})
-        result = self.hotkeys.rebind(
-            region=str(screenshot_cfg.get("hotkey_region") or "Ctrl+Alt+A")
-        )
+        result = self.hotkeys.rebind()
         self.store.save_state()
         return result
 
@@ -194,7 +194,11 @@ class ClockAlarmApp(QObject):
     def show_settings(self) -> None:
         from settings_ui import SettingsDialog
 
-        dialog = SettingsDialog(self.store.state, self.store.save_state)
+        def save_and_rebind():
+            self.store.save_state()
+            self.hotkeys.rebuild()
+
+        dialog = SettingsDialog(self.store.state, save_and_rebind)
         dialog.exec()
 
     def start_deep_clean(self, scopes: list[str] | None = None) -> None:

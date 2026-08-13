@@ -10,8 +10,18 @@ from PyQt6.QtCore import QAbstractNativeEventFilter, QTimer
 from PyQt6.QtWidgets import QApplication
 
 WM_HOTKEY = 0x0312
-HOTKEY_HUB = 0xD001
-HOTKEY_SHOT_REGION = 0xD002
+
+# Standard Hotkey Mapping
+HOTKEY_MAP = {
+    "world_clock": 0xD001,
+    "screenshot": 0xD002,
+    "recorder": 0xD003,
+    "todos": 0xD004,
+    "notes": 0xD005,
+    "media_player": 0xD006,
+    "cleaner": 0xD007,
+}
+
 MOD_ALT = 0x0001
 MOD_CONTROL = 0x0002
 MOD_SHIFT = 0x0004
@@ -78,26 +88,25 @@ class _Filter(QAbstractNativeEventFilter):
 class ClockAlarmHotkeys:
     def __init__(
         self,
-        *,
-        open_hub: Callable[[], None],
-        shot_region: Callable[[], None],
-        hub_combo: str = "Ctrl+Alt+T",
-        region_combo: str = "Ctrl+Alt+A",
+        callbacks: dict[str, Callable[[], None]],
+        state: dict,
     ) -> None:
-        self.open_hub = open_hub
-        self.shot_region = shot_region
-        self.hub_combo = hub_combo
-        self.region_combo = region_combo
+        self.callbacks = callbacks
+        self.state = state
         self._ids: list[int] = []
-        self._handlers = {
-            HOTKEY_HUB: open_hub,
-            HOTKEY_SHOT_REGION: shot_region,
-        }
+        self._handlers: dict[int, Callable[[], None]] = {}
+
+        # Connect internal hotkey IDs to callbacks
+        for key, hotkey_id in HOTKEY_MAP.items():
+            cb = callbacks.get(key)
+            if cb:
+                self._handlers[hotkey_id] = cb
+
         self._filter = _Filter(self._handlers)
         app = QApplication.instance()
         if app:
             app.installNativeEventFilter(self._filter)
-        self._register_all()
+        self.rebuild()
 
     def _unregister(self) -> None:
         user32 = _user32()
@@ -109,17 +118,6 @@ class ClockAlarmHotkeys:
             except Exception:
                 pass
         self._ids.clear()
-
-    def _unregister_shots(self) -> None:
-        user32 = _user32()
-        if not user32:
-            return
-        try:
-            user32.UnregisterHotKey(None, HOTKEY_SHOT_REGION)
-        except Exception:
-            pass
-        if HOTKEY_SHOT_REGION in self._ids:
-            self._ids.remove(HOTKEY_SHOT_REGION)
 
     @staticmethod
     def _configure_api(user32) -> None:
@@ -136,45 +134,59 @@ class ClockAlarmHotkeys:
         except Exception:
             pass
 
-    def _register_all(self) -> None:
+    def rebuild(self) -> None:
         user32 = _user32()
         if not user32:
             return
         self._unregister()
         self._configure_api(user32)
-        for hotkey_id, combo, fallback in (
-            (HOTKEY_HUB, self.hub_combo, (MOD_CONTROL | MOD_ALT, ord("T"))),
-            (HOTKEY_SHOT_REGION, self.region_combo, (MOD_CONTROL | MOD_ALT, ord("A"))),
-        ):
+
+        cfg = self.state.setdefault("hotkeys_config", {})
+        if not cfg.setdefault("enabled", True):
+            return
+
+        combos = cfg.setdefault("combos", {})
+        enables = cfg.setdefault("enables", {})
+
+        defaults = {
+            "world_clock": ("Ctrl+Alt+T", (MOD_CONTROL | MOD_ALT, ord("T"))),
+            "screenshot": ("Ctrl+Alt+A", (MOD_CONTROL | MOD_ALT, ord("A"))),
+            "recorder": ("Ctrl+Alt+R", (MOD_CONTROL | MOD_ALT, ord("R"))),
+            "todos": ("Ctrl+Alt+D", (MOD_CONTROL | MOD_ALT, ord("D"))),
+            "notes": ("Ctrl+Alt+N", (MOD_CONTROL | MOD_ALT, ord("N"))),
+            "media_player": ("Ctrl+Alt+V", (MOD_CONTROL | MOD_ALT, ord("V"))),
+            "cleaner": ("Ctrl+Alt+C", (MOD_CONTROL | MOD_ALT, ord("C"))),
+        }
+
+        for key, hotkey_id in HOTKEY_MAP.items():
+            if not enables.setdefault(key, True):
+                continue
+            combo = combos.setdefault(key, defaults[key][0])
+            fallback = defaults[key][1]
+
             modifiers, virtual_key = parse_hotkey_combo(combo) or fallback
             if user32.RegisterHotKey(None, hotkey_id, int(modifiers), int(virtual_key)):
                 self._ids.append(hotkey_id)
 
     def pause_screenshot_hotkeys(self) -> None:
-        self._unregister_shots()
-
-    def resume_screenshot_hotkeys(self) -> None:
         user32 = _user32()
         if not user32:
             return
-        self._unregister_shots()
-        self._configure_api(user32)
-        modifiers, virtual_key = parse_hotkey_combo(self.region_combo) or (
-            MOD_CONTROL | MOD_ALT,
-            ord("A"),
-        )
-        if user32.RegisterHotKey(None, HOTKEY_SHOT_REGION, int(modifiers), int(virtual_key)):
-            self._ids.append(HOTKEY_SHOT_REGION)
+        try:
+            user32.UnregisterHotKey(None, HOTKEY_MAP["screenshot"])
+        except Exception:
+            pass
+        if HOTKEY_MAP["screenshot"] in self._ids:
+            self._ids.remove(HOTKEY_MAP["screenshot"])
 
-    def rebind(self, hub: str | None = None, region: str | None = None) -> str:
-        if hub is not None:
-            self.hub_combo = hub
-        if region is not None:
-            self.region_combo = region
-        self._register_all()
-        region_ok = HOTKEY_SHOT_REGION in self._ids
-        status = "成功" if region_ok else "失败"
-        return f"时钟 {self.hub_combo} · 区域截图 {self.region_combo}：{status}"
+    def resume_screenshot_hotkeys(self) -> None:
+        self.rebuild()
+
+    def rebind(self) -> str:
+        self.rebuild()
+        screenshot_ok = HOTKEY_MAP["screenshot"] in self._ids
+        status = "成功" if screenshot_ok else "部分失败"
+        return f"快捷键应用：{status}"
 
     def close(self) -> None:
         self._unregister()
