@@ -27,6 +27,47 @@ from cleaner import CLEAN_SCOPES, DEFAULT_SCOPES
 RISKY_CLEAN_SCOPES = {"prefetch", "recycle", "wu", "delivery"}
 
 
+def set_right_click_association(enabled: bool) -> None:
+    import sys
+    import winreg
+    from pathlib import Path
+    
+    key_path = r"Software\Classes\SystemFileAssociations\video\shell\PlayWithClockAlarm"
+    command_path = key_path + r"\command"
+    
+    if enabled:
+        if getattr(sys, "frozen", False):
+            exe_path = sys.executable
+        else:
+            app_root = Path(__file__).resolve().parent
+            parent_exe = app_root.parent / "Clock-Alarm.exe"
+            if parent_exe.exists():
+                exe_path = str(parent_exe)
+            else:
+                exe_path = sys.executable
+                
+        cmd_value = f'"{exe_path}" "%1"'
+        
+        try:
+            key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, key_path)
+            winreg.SetValueEx(key, "", 0, winreg.REG_SZ, "用 Clock/Alarm 播放")
+            winreg.CloseKey(key)
+            
+            cmd_key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, command_path)
+            winreg.SetValueEx(cmd_key, "", 0, winreg.REG_SZ, cmd_value)
+            winreg.CloseKey(cmd_key)
+        except Exception as e:
+            print(f"Failed to register context menu: {e}")
+    else:
+        try:
+            winreg.DeleteKey(winreg.HKEY_CURRENT_USER, command_path)
+            winreg.DeleteKey(winreg.HKEY_CURRENT_USER, key_path)
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            print(f"Failed to unregister context menu: {e}")
+
+
 def _selected_cleaner_scopes(state: dict) -> list[str]:
     cleaner = state.get("cleaner")
     if not isinstance(cleaner, dict):
@@ -106,6 +147,21 @@ class SettingsDialog(_StyledDialog):
         note.setWordWrap(True)
         note.setStyleSheet("color:#94a3b8; font-weight:400;")
         general_layout.addWidget(note)
+
+        self.right_click_menu = QCheckBox("关联 Windows 右键菜单 (使用此播放器播放视频)")
+        import winreg
+        initial_right_click = False
+        try:
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Classes\SystemFileAssociations\video\shell\PlayWithClockAlarm")
+            winreg.CloseKey(key)
+            initial_right_click = True
+        except FileNotFoundError:
+            pass
+        except Exception:
+            pass
+        self.right_click_menu.setChecked(initial_right_click)
+        general_layout.addWidget(self.right_click_menu)
+
         layout.addWidget(general)
 
         cleaner_group = QGroupBox("电脑清理默认范围")
@@ -240,6 +296,9 @@ class SettingsDialog(_StyledDialog):
             
         hotkeys_cfg["combos"] = combos
         hotkeys_cfg["enables"] = enables
+
+        # Save Right-Click Context Menu association
+        set_right_click_association(self.right_click_menu.isChecked())
 
         self.save_state()
         self.accept()

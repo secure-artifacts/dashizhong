@@ -73,6 +73,11 @@ internal static class ClockAlarmLauncher
         }
 
         var pythonArgs = new List<string> { launcher, "-B", mainScript };
+        string[] args = Environment.GetCommandLineArgs();
+        for (int i = 1; i < args.Length; i++)
+        {
+            pythonArgs.Add(args[i]);
+        }
         IntPtr[] strings = new IntPtr[pythonArgs.Count];
         IntPtr argv = IntPtr.Zero;
         try

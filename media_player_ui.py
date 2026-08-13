@@ -22,7 +22,7 @@ from PyQt6.QtGui import QKeyEvent, QAction
 import vlc
 import yt_dlp
 
-MAX_INPUT_URLS = 20
+MAX_INPUT_URLS = 100
 MAX_URL_LENGTH = 2048
 MAX_TITLE_LENGTH = 240
 MAX_QUEUE_ITEMS = 500
@@ -258,14 +258,58 @@ class MediaPlayerWindow(QWidget):
         queue_header = QHBoxLayout()
         queue_title = QLabel("播放列表")
         queue_title.setStyleSheet("font-size: 16px; font-weight: bold;")
+        
         self.open_file_btn = QPushButton("📁 本地文件")
         self.open_file_btn.setStyleSheet("background: #272727; font-size: 12px;")
         self.open_file_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.open_file_btn.clicked.connect(self.open_file)
+        
+        self.import_list_btn = QPushButton("📁 导入列表")
+        self.import_list_btn.setStyleSheet("background: #272727; font-size: 12px;")
+        self.import_list_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.import_list_btn.clicked.connect(self.import_playlist)
+        
         queue_header.addWidget(queue_title)
         queue_header.addStretch()
         queue_header.addWidget(self.open_file_btn)
+        queue_header.addWidget(self.import_list_btn)
         qlayout.addLayout(queue_header)
+        
+        # Playback Mode Selector Buttons
+        mode_layout = QHBoxLayout()
+        mode_layout.setSpacing(4)
+        
+        self.seq_play_btn = QPushButton("🔁 顺序播放")
+        self.single_loop_btn = QPushButton("🔂 单曲循环")
+        self.random_play_btn = QPushButton("🔀 随机播放")
+        
+        for btn in (self.seq_play_btn, self.single_loop_btn, self.random_play_btn):
+            btn.setCheckable(True)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setStyleSheet("""
+                QPushButton {
+                    background: #1f1f1f; color: #aaaaaa; font-size: 11px;
+                    border: 1px solid #2d2d2d; border-radius: 4px; padding: 4px 6px;
+                }
+                QPushButton:checked {
+                    background: #1e3a8a; color: #38bdf8; border-color: #0ea5e9;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    background: #272727;
+                }
+            """)
+            mode_layout.addWidget(btn)
+            
+        qlayout.addLayout(mode_layout)
+        
+        self.seq_play_btn.clicked.connect(lambda: self.set_play_mode("sequence"))
+        self.single_loop_btn.clicked.connect(lambda: self.set_play_mode("single_loop"))
+        self.random_play_btn.clicked.connect(lambda: self.set_play_mode("random"))
+        
+        # Set default active mode
+        self.play_mode = self.state.setdefault("media", {}).setdefault("play_mode", "sequence")
+        self.set_play_mode(self.play_mode)
         
         self.queue_list = QListWidget()
         self.queue_list.itemDoubleClicked.connect(self._on_queue_double_click)
@@ -412,6 +456,10 @@ class MediaPlayerWindow(QWidget):
             if self.current_index == -1:
                 self.play_next()
 
+    def set_buttons_enabled(self, enabled: bool):
+        self.add_queue_btn.setEnabled(enabled)
+        self.import_list_btn.setEnabled(enabled)
+
     def add_to_queue(self):
         text = self.url_input.toPlainText().strip()
         if not text: return
@@ -455,13 +503,13 @@ class MediaPlayerWindow(QWidget):
         extract_limit = min(configured_limit, remaining)
         self.url_input.clear()
         self.status_label.setText("正在解析链接...")
-        self.add_queue_btn.setEnabled(False)
+        self.set_buttons_enabled(False)
         self._extract_limited = False
         self.extractor.extract(urls, extract_limit)
             
     def clear_queue(self):
         self.extractor.cancel()
-        self.add_queue_btn.setEnabled(True)
+        self.set_buttons_enabled(True)
         self.playlist.clear()
         self.queue_list.clear()
         self.current_index = -1
@@ -483,7 +531,7 @@ class MediaPlayerWindow(QWidget):
         self.queue_list.addItem(title)
         
     def _on_extract_finished(self):
-        self.add_queue_btn.setEnabled(True)
+        self.set_buttons_enabled(True)
         if not self._extract_limited:
             self.status_label.setText("解析完成")
         if self.current_index == -1 and self.playlist:
@@ -491,11 +539,11 @@ class MediaPlayerWindow(QWidget):
 
     def _on_extract_limit(self, message):
         self._extract_limited = True
-        self.add_queue_btn.setEnabled(True)
+        self.set_buttons_enabled(True)
         self.status_label.setText(str(message))
             
     def _on_extract_error(self, err):
-        self.add_queue_btn.setEnabled(True)
+        self.set_buttons_enabled(True)
         self.status_label.setText(f"解析错误: {err}")
         QMessageBox.warning(self, "Extraction Error", err)
         
@@ -508,11 +556,89 @@ class MediaPlayerWindow(QWidget):
             self.play_index(self.current_index - 1)
 
     def play_next(self):
-        if self.current_index < len(self.playlist) - 1:
-            self.play_index(self.current_index + 1)
-        else:
-            self.stop()
-            self.status_label.setText("队列播放完毕")
+        if not self.playlist:
+            return
+            
+        if self.play_mode == "single_loop":
+            if self.current_index >= 0:
+                self.play_index(self.current_index)
+            else:
+                self.play_index(0)
+        elif self.play_mode == "random":
+            import random
+            idx = random.randint(0, len(self.playlist) - 1)
+            self.play_index(idx)
+        else: # sequence
+            if self.current_index < len(self.playlist) - 1:
+                self.play_index(self.current_index + 1)
+            else:
+                self.play_index(0)
+
+    def set_play_mode(self, mode: str):
+        self.play_mode = mode
+        self.seq_play_btn.setChecked(mode == "sequence")
+        self.single_loop_btn.setChecked(mode == "single_loop")
+        self.random_play_btn.setChecked(mode == "random")
+        self.state.setdefault("media", {})["play_mode"] = mode
+        if self.save_state:
+            self.save_state()
+
+    def import_playlist(self):
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "导入播放列表", "", "播放列表 (*.txt *.m3u)"
+        )
+        if not file_path:
+            return
+            
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+        except UnicodeDecodeError:
+            try:
+                with open(file_path, "r", encoding="gbk") as f:
+                    lines = f.readlines()
+            except Exception as e:
+                QMessageBox.warning(self, "导入失败", f"无法读取文件: {e}")
+                return
+        except Exception as e:
+            QMessageBox.warning(self, "导入失败", f"无法读取文件: {e}")
+            return
+            
+        urls = []
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith("#"):
+                continue
+            urls.append(line)
+            
+        if not urls:
+            QMessageBox.information(self, "导入列表", "未在文件中找到有效的视频路径或链接。")
+            return
+            
+        media_cfg = self.state.get("media")
+        if not isinstance(media_cfg, dict):
+            media_cfg = {}
+            
+        remaining = MAX_QUEUE_ITEMS - len(self.playlist)
+        if remaining <= 0:
+            QMessageBox.information(self, "播放列表", "播放列表已达到安全上限。")
+            return
+            
+        configured_limit = max(
+            1,
+            min(
+                200,
+                int(media_cfg.get("playlist_limit") or DEFAULT_PLAYLIST_LIMIT),
+            ),
+        )
+        extract_limit = min(configured_limit, remaining)
+        
+        self.status_label.setText("正在导入并解析列表项目...")
+        self.set_buttons_enabled(False)
+        self._extract_limited = False
+        self.extractor.extract(urls[:extract_limit], extract_limit)
 
     def play_index(self, index: int):
         if index < 0 or index >= len(self.playlist): return

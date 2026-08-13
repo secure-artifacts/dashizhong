@@ -52,6 +52,19 @@ def _install_exception_hooks() -> Path:
     return log_path
 
 
+def _get_video_from_argv() -> str | None:
+    import sys
+    import os
+    for arg in sys.argv[1:]:
+        if arg in ("-B", "-u", "-d") or arg.endswith(".py"):
+            continue
+        if os.path.exists(arg):
+            return os.path.abspath(arg)
+        if arg.startswith("http://") or arg.startswith("https://") or arg.startswith("www."):
+            return arg
+    return None
+
+
 class ClockAlarmApp(QObject):
     clean_finished = pyqtSignal(object)
 
@@ -90,7 +103,11 @@ class ClockAlarmApp(QObject):
         self.alarm_timer.timeout.connect(self._alarm_tick)
         self.alarm_timer.start(1000)
         self.store.append_log("login", "Clock/Alarm started")
-        QTimer.singleShot(200, self.show_world_clock)
+        video_arg = _get_video_from_argv()
+        if video_arg:
+            QTimer.singleShot(400, lambda: self.show_media_player_with_video(video_arg))
+        else:
+            QTimer.singleShot(200, self.show_world_clock)
 
     def _cb(self) -> SimpleNamespace:
         return SimpleNamespace(
@@ -190,6 +207,25 @@ class ClockAlarmApp(QObject):
             )
         self.media_player_board.show()
         self.media_player_board.raise_()
+
+    def show_media_player_with_video(self, video_path: str) -> None:
+        import os
+        self.show_media_player2()
+        if self.media_player_board:
+            title = os.path.basename(video_path)
+            if video_path.startswith("http"):
+                title = "在线视频"
+            
+            exists = False
+            for idx, (t, u) in enumerate(self.media_player_board.playlist):
+                if u == video_path:
+                    self.media_player_board.play_index(idx)
+                    exists = True
+                    break
+            if not exists:
+                self.media_player_board.playlist.append((title, video_path))
+                self.media_player_board.queue_list.addItem(title)
+                self.media_player_board.play_index(len(self.media_player_board.playlist) - 1)
 
     def show_settings(self) -> None:
         from settings_ui import SettingsDialog
