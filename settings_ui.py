@@ -27,13 +27,59 @@ from cleaner import CLEAN_SCOPES, DEFAULT_SCOPES
 RISKY_CLEAN_SCOPES = {"prefetch", "recycle", "wu", "delivery"}
 
 
+VIDEO_CONTEXT_EXTENSIONS = (
+    ".mp4", ".mkv", ".avi", ".mov", ".wmv", ".flv", ".webm", ".m4v",
+    ".mpeg", ".mpg", ".ts", ".mts", ".m2ts", ".3gp",
+)
+
+
+def _right_click_key_paths() -> list[str]:
+    base = r"Software\Classes\SystemFileAssociations"
+    return [
+        base + r"\video\shell\PlayWithClockAlarm",
+        *(base + rf"\{extension}\shell\PlayWithClockAlarm"
+          for extension in VIDEO_CONTEXT_EXTENSIONS),
+    ]
+
+
+def _delete_registry_tree(root, path: str) -> None:
+    import winreg
+
+    try:
+        with winreg.OpenKey(root, path, 0, winreg.KEY_READ | winreg.KEY_WRITE) as key:
+            children = []
+            index = 0
+            while True:
+                try:
+                    children.append(winreg.EnumKey(key, index))
+                    index += 1
+                except OSError:
+                    break
+        for child in children:
+            _delete_registry_tree(root, path + "\\" + child)
+        winreg.DeleteKey(root, path)
+    except FileNotFoundError:
+        pass
+
+
+def is_right_click_association_enabled() -> bool:
+    import winreg
+
+    for key_path in _right_click_key_paths():
+        try:
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path + r"\command") as key:
+                value, _value_type = winreg.QueryValueEx(key, "")
+                if "Clock-Alarm.exe" in str(value):
+                    return True
+        except OSError:
+            continue
+    return False
+
+
 def set_right_click_association(enabled: bool) -> None:
     import sys
     import winreg
     from pathlib import Path
-    
-    key_path = r"Software\Classes\SystemFileAssociations\video\shell\PlayWithClockAlarm"
-    command_path = key_path + r"\command"
     
     if enabled:
         if getattr(sys, "frozen", False):
@@ -46,26 +92,104 @@ def set_right_click_association(enabled: bool) -> None:
             else:
                 exe_path = sys.executable
                 
-        cmd_value = f'"{exe_path}" "%1"'
-        
-        try:
-            key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, key_path)
-            winreg.SetValueEx(key, "", 0, winreg.REG_SZ, "用 Clock/Alarm 播放")
-            winreg.CloseKey(key)
-            
-            cmd_key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, command_path)
-            winreg.SetValueEx(cmd_key, "", 0, winreg.REG_SZ, cmd_value)
-            winreg.CloseKey(cmd_key)
-        except Exception as e:
-            print(f"Failed to register context menu: {e}")
+        exe_path = str(Path(exe_path).resolve())
+        if not Path(exe_path).is_file():
+            raise FileNotFoundError(f"播放器启动文件不存在：{exe_path}")
+        cmd_value = f'"{exe_path}" --play "%1"'
+
+        for key_path in _right_click_key_paths():
+            command_path = key_path + r"\command"
+            with winreg.CreateKey(winreg.HKEY_CURRENT_USER, key_path) as key:
+                winreg.SetValueEx(key, "", 0, winreg.REG_SZ, "使用 Clock/Alarm 播放")
+                winreg.SetValueEx(key, "Icon", 0, winreg.REG_SZ, f'"{exe_path}",0')
+            with winreg.CreateKey(winreg.HKEY_CURRENT_USER, command_path) as cmd_key:
+                winreg.SetValueEx(cmd_key, "", 0, winreg.REG_SZ, cmd_value)
+
+        # Register as an application as well as a context-menu verb. This is
+        # what makes Clock/Alarm appear in Windows 11's "Open with" chooser.
+        application_key = r"Software\Classes\Applications\Clock-Alarm.exe"
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, application_key) as key:
+            winreg.SetValueEx(key, "FriendlyAppName", 0, winreg.REG_SZ, "Clock/Alarm 视频播放器")
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, application_key + r"\DefaultIcon") as key:
+            winreg.SetValueEx(key, "", 0, winreg.REG_SZ, f'"{exe_path}",0')
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, application_key + r"\shell\open\command") as key:
+            winreg.SetValueEx(key, "", 0, winreg.REG_SZ, cmd_value)
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, application_key + r"\SupportedTypes") as key:
+            for extension in VIDEO_CONTEXT_EXTENSIONS:
+                winreg.SetValueEx(key, extension, 0, winreg.REG_SZ, "")
+
+        capabilities_key = r"Software\ClockAlarm\Capabilities"
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, capabilities_key) as key:
+            winreg.SetValueEx(key, "ApplicationName", 0, winreg.REG_SZ, "Clock/Alarm 视频播放器")
+            winreg.SetValueEx(key, "ApplicationDescription", 0, winreg.REG_SZ, "使用 Clock/Alarm 播放本地视频")
+            winreg.SetValueEx(key, "ApplicationIcon", 0, winreg.REG_SZ, f'"{exe_path}",0')
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, capabilities_key + r"\FileAssociations") as key:
+            for extension in VIDEO_CONTEXT_EXTENSIONS:
+                winreg.SetValueEx(key, extension, 0, winreg.REG_SZ, "ClockAlarm.Video")
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\RegisteredApplications") as key:
+            winreg.SetValueEx(key, "ClockAlarm", 0, winreg.REG_SZ, capabilities_key)
+
+        progid_key = r"Software\Classes\ClockAlarm.Video"
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, progid_key) as key:
+            winreg.SetValueEx(key, "", 0, winreg.REG_SZ, "Clock/Alarm 视频文件")
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, progid_key + r"\DefaultIcon") as key:
+            winreg.SetValueEx(key, "", 0, winreg.REG_SZ, f'"{exe_path}",0')
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, progid_key + r"\shell\open\command") as key:
+            winreg.SetValueEx(key, "", 0, winreg.REG_SZ, cmd_value)
+        for extension in VIDEO_CONTEXT_EXTENSIONS:
+            open_with_key = rf"Software\Classes\{extension}\OpenWithProgids"
+            with winreg.CreateKey(winreg.HKEY_CURRENT_USER, open_with_key) as key:
+                winreg.SetValueEx(key, "ClockAlarm.Video", 0, winreg.REG_NONE, b"")
     else:
+        for key_path in _right_click_key_paths():
+            try:
+                winreg.DeleteKey(winreg.HKEY_CURRENT_USER, key_path + r"\command")
+            except FileNotFoundError:
+                pass
+            try:
+                winreg.DeleteKey(winreg.HKEY_CURRENT_USER, key_path)
+            except FileNotFoundError:
+                pass
+        _delete_registry_tree(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Classes\Applications\Clock-Alarm.exe",
+        )
+        _delete_registry_tree(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Classes\ClockAlarm.Video",
+        )
+        _delete_registry_tree(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\ClockAlarm\Capabilities",
+        )
         try:
-            winreg.DeleteKey(winreg.HKEY_CURRENT_USER, command_path)
-            winreg.DeleteKey(winreg.HKEY_CURRENT_USER, key_path)
+            with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\RegisteredApplications",
+                0,
+                winreg.KEY_SET_VALUE,
+            ) as key:
+                winreg.DeleteValue(key, "ClockAlarm")
         except FileNotFoundError:
             pass
-        except Exception as e:
-            print(f"Failed to unregister context menu: {e}")
+        for extension in VIDEO_CONTEXT_EXTENSIONS:
+            try:
+                with winreg.OpenKey(
+                    winreg.HKEY_CURRENT_USER,
+                    rf"Software\Classes\{extension}\OpenWithProgids",
+                    0,
+                    winreg.KEY_SET_VALUE,
+                ) as key:
+                    winreg.DeleteValue(key, "ClockAlarm.Video")
+            except FileNotFoundError:
+                pass
+
+    try:
+        import ctypes
+
+        ctypes.windll.shell32.SHChangeNotify(0x08000000, 0x0000, None, None)
+    except Exception:
+        pass
 
 
 def _selected_cleaner_scopes(state: dict) -> list[str]:
@@ -149,16 +273,11 @@ class SettingsDialog(_StyledDialog):
         general_layout.addWidget(note)
 
         self.right_click_menu = QCheckBox("关联 Windows 右键菜单 (使用此播放器播放视频)")
-        import winreg
-        initial_right_click = False
-        try:
-            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Classes\SystemFileAssociations\video\shell\PlayWithClockAlarm")
-            winreg.CloseKey(key)
-            initial_right_click = True
-        except FileNotFoundError:
-            pass
-        except Exception:
-            pass
+        media_cfg = state.get("media") if isinstance(state.get("media"), dict) else {}
+        initial_right_click = bool(
+            media_cfg.get("right_click_association", False)
+            or is_right_click_association_enabled()
+        )
         self.right_click_menu.setChecked(initial_right_click)
         general_layout.addWidget(self.right_click_menu)
 
@@ -181,7 +300,6 @@ class SettingsDialog(_StyledDialog):
 
         media_group = QGroupBox("视频播放器")
         media_form = QFormLayout(media_group)
-        media_cfg = state.get("media") if isinstance(state.get("media"), dict) else {}
         self.allow_online = QCheckBox("允许解析在线视频链接 and YouTube")
         self.allow_online.setChecked(bool(media_cfg.get("allow_online", True)))
         media_form.addRow(self.allow_online)
@@ -298,7 +416,14 @@ class SettingsDialog(_StyledDialog):
         hotkeys_cfg["enables"] = enables
 
         # Save Right-Click Context Menu association
-        set_right_click_association(self.right_click_menu.isChecked())
+        try:
+            set_right_click_association(self.right_click_menu.isChecked())
+        except Exception as exc:
+            QMessageBox.critical(self, "右键菜单关联失败", str(exc))
+            return
+        self.state.setdefault("media", {})["right_click_association"] = (
+            self.right_click_menu.isChecked()
+        )
 
         self.save_state()
         self.accept()

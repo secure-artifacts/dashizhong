@@ -31,6 +31,8 @@ DEFAULT_STATE: dict[str, Any] = {
     "media": {
         "allow_online": True,
         "playlist_limit": 100,
+        "playlist": [],
+        "right_click_association": False,
     },
     "todos": [],
     "notes": [],
