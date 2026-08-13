@@ -259,12 +259,12 @@ class MediaPlayerWindow(QWidget):
         queue_title = QLabel("播放列表")
         queue_title.setStyleSheet("font-size: 16px; font-weight: bold;")
         
-        self.open_file_btn = QPushButton("📁 本地文件")
+        self.open_file_btn = QPushButton("本地文件")
         self.open_file_btn.setStyleSheet("background: #272727; font-size: 12px;")
         self.open_file_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.open_file_btn.clicked.connect(self.open_file)
         
-        self.import_list_btn = QPushButton("📁 导入列表")
+        self.import_list_btn = QPushButton("导入列表")
         self.import_list_btn.setStyleSheet("background: #272727; font-size: 12px;")
         self.import_list_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.import_list_btn.clicked.connect(self.import_playlist)
@@ -459,6 +459,7 @@ class MediaPlayerWindow(QWidget):
     def set_buttons_enabled(self, enabled: bool):
         self.add_queue_btn.setEnabled(enabled)
         self.import_list_btn.setEnabled(enabled)
+        self.open_file_btn.setEnabled(enabled)
 
     def add_to_queue(self):
         text = self.url_input.toPlainText().strip()
