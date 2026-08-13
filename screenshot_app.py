@@ -1583,7 +1583,7 @@ class ScreenshotEditor(QWidget):
                 QMessageBox.information(self, "截图", "请先框选有效区域")
             return
         if act == "copy":
-            copy_image_to_clipboard(img)
+            QApplication.clipboard().setImage(img)
             self._finish_ok(img)
             return
         if act == "pin":
@@ -1598,7 +1598,7 @@ class ScreenshotEditor(QWidget):
             # auto save + copy image then exit
             path = self._default_save_dir() / f"shot_{time.strftime('%Y%m%d_%H%M%S')}.png"
             img.save(str(path))
-            copy_image_to_clipboard(img)
+            QApplication.clipboard().setImage(img)
             self._finish_ok(img)
             return
 

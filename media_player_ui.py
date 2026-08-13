@@ -580,8 +580,6 @@ class MediaPlayerWindow(QWidget):
         self.single_loop_btn.setChecked(mode == "single_loop")
         self.random_play_btn.setChecked(mode == "random")
         self.state.setdefault("media", {})["play_mode"] = mode
-        if self.save_state:
-            self.save_state()
 
     def import_playlist(self):
         file_path, _ = QFileDialog.getOpenFileName(
@@ -709,4 +707,9 @@ class MediaPlayerWindow(QWidget):
 
     def closeEvent(self, event):
         self.player.stop()
+        if self.save_state:
+            try:
+                self.save_state()
+            except Exception:
+                pass
         event.accept()
