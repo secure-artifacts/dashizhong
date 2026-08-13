@@ -655,6 +655,12 @@ class ScreenshotEditor(QWidget):
 
         self._dock_hits = hits
 
+    def _hit_dock(self, pos: QPoint) -> tuple[str, str, str, str] | None:
+        for key, icon_id, tip, kind, rect in self._dock_hits:
+            if rect.contains(pos):
+                return key, icon_id, tip, kind
+        return None
+
     def _draw_icon(self, p: QPainter, icon_id: str, rect: QRect, fg: QColor) -> None:
         """Vector icon for dock buttons (Flameshot-style recognition)."""
         p.save()
