@@ -279,9 +279,9 @@ class MediaPlayerWindow(QWidget):
         mode_layout = QHBoxLayout()
         mode_layout.setSpacing(4)
         
-        self.seq_play_btn = QPushButton("🔁 顺序播放")
-        self.single_loop_btn = QPushButton("🔂 单曲循环")
-        self.random_play_btn = QPushButton("🔀 随机播放")
+        self.seq_play_btn = QPushButton("顺序播放")
+        self.single_loop_btn = QPushButton("单曲循环")
+        self.random_play_btn = QPushButton("随机播放")
         
         for btn in (self.seq_play_btn, self.single_loop_btn, self.random_play_btn):
             btn.setCheckable(True)
