@@ -547,13 +547,25 @@ class ScreenshotEditor(QWidget):
             "br": QRect(x2 - r, y2 - r, r * 2, r * 2),
         }
 
+    def _is_near_border(self, pt: QPoint) -> bool:
+        if self.sel.isNull():
+            return False
+        s = self.sel.normalized()
+        margin = 6
+        on_left = abs(pt.x() - s.left()) <= margin and s.top() <= pt.y() <= s.bottom()
+        on_right = abs(pt.x() - s.right()) <= margin and s.top() <= pt.y() <= s.bottom()
+        on_top = abs(pt.y() - s.top()) <= margin and s.left() <= pt.x() <= s.right()
+        on_bottom = abs(pt.y() - s.bottom()) <= margin and s.left() <= pt.x() <= s.right()
+        return on_left or on_right or on_top or on_bottom
+
     def _hit_handle(self, pt: QPoint) -> str:
         handles = self._get_handles()
         for k, rect in handles.items():
             if rect.adjusted(-4, -4, 4, 4).contains(pt):
                 return k
-        if self.phase == "edit" and not self.sel.isNull() and self.sel.normalized().contains(pt):
-            return "inside"
+        if self.phase == "edit" and not self.sel.isNull():
+            if self._is_near_border(pt):
+                return "inside"
         return ""
 
     def _rebuild_dock(self) -> None:
@@ -1245,18 +1257,20 @@ class ScreenshotEditor(QWidget):
                     self.update()
 
             handle = self._hit_handle(pos)
+            target_cursor = Qt.CursorShape.CrossCursor
             if handle in ("tl", "br"):
-                self.setCursor(Qt.CursorShape.SizeBDiagCursor)
+                target_cursor = Qt.CursorShape.SizeBDiagCursor
             elif handle in ("tr", "bl"):
-                self.setCursor(Qt.CursorShape.SizeFDiagCursor)
+                target_cursor = Qt.CursorShape.SizeFDiagCursor
             elif handle in ("tm", "bm"):
-                self.setCursor(Qt.CursorShape.SizeVerCursor)
+                target_cursor = Qt.CursorShape.SizeVerCursor
             elif handle in ("ml", "mr"):
-                self.setCursor(Qt.CursorShape.SizeHorCursor)
+                target_cursor = Qt.CursorShape.SizeHorCursor
             elif handle == "inside":
-                self.setCursor(Qt.CursorShape.CrossCursor)
-            else:
-                self.setCursor(Qt.CursorShape.CrossCursor)
+                target_cursor = Qt.CursorShape.SizeAllCursor if self._is_near_border(pos) else Qt.CursorShape.CrossCursor
+
+            if self.cursor().shape() != target_cursor:
+                self.setCursor(target_cursor)
 
             if self.drawing and self.cur_stroke:
                 pos = self._clamp_to_sel(pos)
