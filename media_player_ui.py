@@ -303,9 +303,9 @@ class MediaPlayerWindow(QWidget):
             
         qlayout.addLayout(mode_layout)
         
-        self.seq_play_btn.clicked.connect(lambda: self.set_play_mode("sequence"))
-        self.single_loop_btn.clicked.connect(lambda: self.set_play_mode("single_loop"))
-        self.random_play_btn.clicked.connect(lambda: self.set_play_mode("random"))
+        self.seq_play_btn.clicked.connect(lambda *args: self.set_play_mode("sequence"))
+        self.single_loop_btn.clicked.connect(lambda *args: self.set_play_mode("single_loop"))
+        self.random_play_btn.clicked.connect(lambda *args: self.set_play_mode("random"))
         
         # Set default active mode
         self.play_mode = self.state.setdefault("media", {}).setdefault("play_mode", "sequence")
