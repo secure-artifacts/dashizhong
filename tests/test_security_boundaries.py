@@ -169,6 +169,15 @@ class ConsentAndLifecyclePolicyTests(unittest.TestCase):
         self.assertIn("self.extractor.cancel()", source)
         self.assertIn("len(self.playlist) >= MAX_QUEUE_ITEMS", source)
 
+    def test_offline_build_requires_qt_multimedia_runtime(self) -> None:
+        source = (ROOT / "scripts" / "build_offline_portable.ps1").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("QtMultimedia.pyd", source)
+        self.assertIn("QtMultimediaWidgets.pyd", source)
+        self.assertIn("QtNetwork.pyd", source)
+        self.assertIn("ffmpegmediaplugin.dll", source)
+
 
 class ReleaseBoundaryTests(unittest.TestCase):
     def test_runtime_requirements_are_exactly_pinned(self) -> None:

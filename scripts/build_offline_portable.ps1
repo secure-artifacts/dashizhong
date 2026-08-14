@@ -21,6 +21,21 @@ $portableRoot = Join-Path $outputRootPath "Clock-Alarm-$Version-portable"
 if (-not (Test-Path -LiteralPath (Join-Path $runtimeSourcePath "python314.dll"))) {
     throw "Runtime source is missing python314.dll: $runtimeSourcePath"
 }
+$requiredMediaRuntime = @(
+    "lib\PyQt6\QtMultimedia.pyd",
+    "lib\PyQt6\QtMultimediaWidgets.pyd",
+    "lib\PyQt6\QtNetwork.pyd",
+    "lib\PyQt6\Qt6\bin\Qt6Multimedia.dll",
+    "lib\PyQt6\Qt6\plugins\multimedia\ffmpegmediaplugin.dll"
+)
+$missingMediaRuntime = @(
+    $requiredMediaRuntime | Where-Object {
+        -not (Test-Path -LiteralPath (Join-Path $runtimeSourcePath $_))
+    }
+)
+if ($missingMediaRuntime.Count -gt 0) {
+    throw "Runtime source cannot launch the video player; missing: $($missingMediaRuntime -join ', ')"
+}
 if (Test-Path -LiteralPath $portableRoot) {
     throw "Output already exists; choose a fresh OutputRoot: $portableRoot"
 }

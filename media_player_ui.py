@@ -1,15 +1,19 @@
-"""Media player with icon-based UI, thread-safe VLC bridge, and native window isolation."""
+"""Media player with crystal-clear docked controls, smooth collapsible playlist, high-speed streaming, HD quality switcher, and modern UI."""
 
 from __future__ import annotations
 
 import os
+import random
+import shutil
+import tempfile
 import threading
+from pathlib import Path
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject, QRectF, QPointF, QSize, QUrl
 from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PyQt6.QtMultimediaWidgets import QVideoWidget
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QPlainTextEdit,
-    QFrame, QLabel, QFileDialog, QSlider, QListWidget, QMenu
+    QLabel, QFileDialog, QSlider, QListWidget, QListWidgetItem, QMenu, QSizePolicy
 )
 from PyQt6.QtGui import (
     QKeyEvent, QAction, QIcon, QPixmap, QPainter, QPen, QColor,
@@ -22,11 +26,12 @@ MAX_URL_LENGTH = 2048
 MAX_TITLE_LENGTH = 240
 MAX_QUEUE_ITEMS = 500
 DEFAULT_PLAYLIST_LIMIT = 100
+MAX_COMPAT_CACHE_BYTES = 512 * 1024 * 1024
 
 
 # ─── Icon Factory ──────────────────────────────────────────────────────────
 
-def _make_icon(draw_fn, size=22, color='#d0d0d0'):
+def _make_icon(draw_fn, size=22, color='#e2e8f0'):
     pm = QPixmap(size, size)
     pm.fill(Qt.GlobalColor.transparent)
     p = QPainter(pm)
@@ -36,8 +41,7 @@ def _make_icon(draw_fn, size=22, color='#d0d0d0'):
     return QIcon(pm)
 
 
-def _make_dual_icon(draw_fn, size=22, off_color='#aaaaaa', on_color='#38bdf8'):
-    """Icon with normal (off) and checked (on) states."""
+def _make_dual_icon(draw_fn, size=22, off_color='#94a3b8', on_color='#38bdf8'):
     icon = QIcon()
     for state, color in ((QIcon.State.Off, off_color), (QIcon.State.On, on_color)):
         pm = QPixmap(size, size)
@@ -162,6 +166,37 @@ def _draw_expand(p, s, c):
         p.drawLine(QPointF(x1, y1), QPointF(x1 + dx, y1 + dy))
 
 
+def _draw_pin(p, s, c):
+    p.save()
+    p.translate(s * 0.5, s * 0.5)
+    p.rotate(-25)
+    p.setPen(QPen(c, 1.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+    p.setBrush(c)
+    head = QPainterPath()
+    head.moveTo(-s * 0.18, -s * 0.30)
+    head.lineTo(s * 0.18, -s * 0.30)
+    head.lineTo(s * 0.13, -s * 0.18)
+    head.lineTo(s * 0.10, s * 0.05)
+    head.lineTo(s * 0.23, s * 0.15)
+    head.lineTo(-s * 0.23, s * 0.15)
+    head.lineTo(-s * 0.10, s * 0.05)
+    head.lineTo(-s * 0.13, -s * 0.18)
+    head.closeSubpath()
+    p.drawPath(head)
+    p.drawLine(QPointF(0, s * 0.15), QPointF(0, s * 0.40))
+    p.restore()
+
+
+def _draw_hd(p, s, c):
+    p.setPen(QPen(c, 1.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawRoundedRect(QRectF(s * 0.12, s * 0.20, s * 0.76, s * 0.60), 3, 3)
+    f = QFont('Arial', max(1, int(s * 0.30)))
+    f.setBold(True)
+    p.setFont(f)
+    p.drawText(QRectF(s * 0.12, s * 0.20, s * 0.76, s * 0.60), Qt.AlignmentFlag.AlignCenter, "HD")
+
+
 def _draw_repeat(p, s, c):
     pen = QPen(c, 1.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
     p.setPen(pen)
@@ -196,7 +231,7 @@ def _draw_shuffle(p, s, c):
     a = s * 0.1
     p.drawLine(QPointF(s - m - a, m + y_off), QPointF(s - m, m + y_off))
     p.drawLine(QPointF(s - m, m + y_off + a), QPointF(s - m, m + y_off))
-    p.drawLine(QPointF(s - m - a, s - m - y_off), QPointF(s - m, s - m - y_off))
+    p.drawLine(QPointF(s - m, s - m - y_off), QPointF(s - m, s - m - y_off))
     p.drawLine(QPointF(s - m, s - m - y_off - a), QPointF(s - m, s - m - y_off))
 
 
@@ -216,10 +251,11 @@ def _draw_clear(p, s, c):
     p.drawLine(QPointF(s - m, m), QPointF(m, s - m))
 
 
-# ─── Thread-Safe Signals ──────────────────────────────────────────────────
-
-class VlcBridge(QObject):
-    end_reached = pyqtSignal()
+def _draw_playlist_icon(p, s, c):
+    p.setPen(QPen(c, 1.8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+    p.drawLine(QPointF(s * 0.20, s * 0.28), QPointF(s * 0.80, s * 0.28))
+    p.drawLine(QPointF(s * 0.20, s * 0.50), QPointF(s * 0.80, s * 0.50))
+    p.drawLine(QPointF(s * 0.20, s * 0.72), QPointF(s * 0.60, s * 0.72))
 
 
 # ─── YtDlp Workers ────────────────────────────────────────────────────────
@@ -299,29 +335,120 @@ class YtDlpWorker(QObject):
 
 
 class YtDlpStreamWorker(QObject):
-    stream_extracted = pyqtSignal(int, str)
+    media_ready = pyqtSignal(int, str, int)  # req_id, file_path, height
+    media_status = pyqtSignal(int, str)
     error = pyqtSignal(int, str)
 
-    def extract(self, req_id: int, url: str):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._cancel_event = threading.Event()
+
+    def cancel(self):
+        self._cancel_event.set()
+
+    def load_media(self, req_id: int, url: str, target_height: int, cache_dir: str):
+        self.cancel()
+        cancel_event = threading.Event()
+        self._cancel_event = cancel_event
+
         def _run():
             try:
-                if len(url) > MAX_URL_LENGTH:
-                    raise ValueError("URL too long")
+                self.media_status.emit(req_id, "正在极速缓冲...")
+                Path(cache_dir).mkdir(parents=True, exist_ok=True)
+                output_stem = f"media-{req_id}-q{target_height}"
+                output_template = str(Path(cache_dir) / f"{output_stem}.%(ext)s")
+
+                # Check if cached
+                cached_files = [
+                    p for p in Path(cache_dir).glob(f"{output_stem}.*")
+                    if p.is_file() and p.suffix.lower() not in {'.part', '.ytdl', '.json'}
+                ]
+                if cached_files:
+                    playable = max(cached_files, key=lambda p: p.stat().st_mtime_ns)
+                    self.media_ready.emit(req_id, str(playable), target_height)
+                    return
+
+                def _progress_hook(_status):
+                    if cancel_event.is_set():
+                        raise yt_dlp.utils.DownloadCancelled()
+
+                if target_height > 0:
+                    fmt_spec = f'bestvideo[height<={target_height}]+bestaudio/best[height<={target_height}]/best'
+                else:
+                    fmt_spec = 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best'
+
                 ydl_opts = {
-                    'format': 'best',
+                    'extractor_args': {'youtube': {'player_client': ['android', 'web']}},
+                    'format': fmt_spec,
                     'quiet': True,
                     'no_warnings': True,
                     'socket_timeout': 15,
+                    'noplaylist': True,
+                    'max_filesize': MAX_COMPAT_CACHE_BYTES,
+                    'outtmpl': output_template,
+                    'nopart': False,
+                    'progress_hooks': [_progress_hook],
                 }
+                try:
+                    import imageio_ffmpeg
+                    ydl_opts['ffmpeg_location'] = imageio_ffmpeg.get_ffmpeg_exe()
+                except Exception:
+                    pass
+
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(url, download=False)
-                    best_url = info.get('url', None)
-                    if best_url:
-                        self.stream_extracted.emit(req_id, best_url)
-                    else:
-                        self.error.emit(req_id, "Could not extract stream URL.")
+                    ydl.extract_info(url, download=True)
+
+                if cancel_event.is_set():
+                    return
+
+                files = [
+                    path for path in Path(cache_dir).glob(f"{output_stem}.*")
+                    if path.is_file() and path.suffix.lower() not in {'.part', '.ytdl', '.json'}
+                ]
+                if not files:
+                    raise RuntimeError("无法生成播放文件。")
+                playable = max(files, key=lambda path: path.stat().st_mtime_ns)
+                self.media_ready.emit(req_id, str(playable), target_height)
             except Exception as e:
-                self.error.emit(req_id, str(e))
+                if not cancel_event.is_set():
+                    self.error.emit(req_id, str(e))
+        threading.Thread(target=_run, daemon=True).start()
+
+    def prefetch(self, url: str, target_height: int, cache_dir: str):
+        def _run():
+            try:
+                Path(cache_dir).mkdir(parents=True, exist_ok=True)
+                output_stem = f"prefetch-{abs(hash(url))}-q{target_height}"
+                output_template = str(Path(cache_dir) / f"{output_stem}.%(ext)s")
+
+                if any(Path(cache_dir).glob(f"{output_stem}.*")):
+                    return
+
+                if target_height > 0:
+                    fmt_spec = f'bestvideo[height<={target_height}]+bestaudio/best[height<={target_height}]/best'
+                else:
+                    fmt_spec = 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best'
+
+                ydl_opts = {
+                    'extractor_args': {'youtube': {'player_client': ['android', 'web']}},
+                    'format': fmt_spec,
+                    'quiet': True,
+                    'no_warnings': True,
+                    'socket_timeout': 15,
+                    'noplaylist': True,
+                    'max_filesize': MAX_COMPAT_CACHE_BYTES,
+                    'outtmpl': output_template,
+                }
+                try:
+                    import imageio_ffmpeg
+                    ydl_opts['ffmpeg_location'] = imageio_ffmpeg.get_ffmpeg_exe()
+                except Exception:
+                    pass
+
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    ydl.extract_info(url, download=True)
+            except Exception:
+                pass
         threading.Thread(target=_run, daemon=True).start()
 
 
@@ -333,68 +460,106 @@ class MediaPlayerWindow(QWidget):
         self.state = state if isinstance(state, dict) else {}
         self.save_state = save_state
         self.setWindowTitle("Clock/Alarm - Player")
-        self.resize(1000, 700)
+        self.resize(1040, 700)
+        self.setMinimumSize(540, 360)
 
-        # Qt Multimedia uses the bundled asynchronous FFmpeg backend. Keeping
-        # media operations out of libVLC's synchronous stop/set_media path
-        # prevents the UI thread from freezing while files are switched.
         self._vlc_ready = True
-        self.instance = None
-        self.event_manager = None
-        self._vlc_end_cb = None
-
         self._current_request_id = 0
         self._is_changing_media = False
+        self._online_source_url = ""
+        self._media_retry_pending = False
+        self._media_cache_dir = tempfile.mkdtemp(prefix="ClockAlarm-media-")
+        self._selected_quality_height = 0  # 0 means Auto / 1080p
+        self._pending_seek_pos = 0
 
         self.setStyleSheet("""
-            QWidget { background-color: #0f0f0f; color: #f1f1f1; }
+            QWidget { background-color: #0b0f17; color: #f1f5f9; font-family: 'Segoe UI', system-ui, sans-serif; }
             QPlainTextEdit {
-                background: #1a1a1a; border: 1px solid #3f3f3f;
-                border-radius: 8px; padding: 10px; color: #fff; font-size: 14px;
+                background: #111827; border: 1px solid #1f2937;
+                border-radius: 8px; padding: 8px; color: #fff; font-size: 13px;
             }
-            QPlainTextEdit:focus { border: 1px solid #cc0000; }
+            QPlainTextEdit:focus { border: 1px solid #0284c7; }
             QPushButton {
-                background: transparent; color: #f1f1f1; border: none;
-                font-weight: bold; border-radius: 8px; padding: 6px 10px;
+                background: transparent; color: #cbd5e1; border: none;
+                font-weight: bold; border-radius: 6px; padding: 4px 6px;
             }
-            QPushButton:hover { background: rgba(255,255,255,0.08); }
-            QPushButton:disabled { opacity: 0.4; }
-            QPushButton#primary { background: #cc0000; color: #fff; }
-            QPushButton#primary:hover { background: #ff0000; }
+            QPushButton:hover { background: rgba(255,255,255,0.12); color: #ffffff; }
+            QPushButton:disabled { opacity: 0.35; }
+            QPushButton#primary { background: #0284c7; color: #fff; border-radius: 6px; }
+            QPushButton#primary:hover { background: #0369a1; }
             QSlider::groove:horizontal {
                 border: none; height: 6px;
-                background: rgba(255,255,255,0.15); border-radius: 3px;
+                background: rgba(255,255,255,0.18); border-radius: 3px;
             }
             QSlider::handle:horizontal {
-                background: #ff0000; width: 14px; height: 14px;
+                background: #38bdf8; width: 14px; height: 14px;
                 margin: -4px 0; border-radius: 7px;
             }
-            QSlider::sub-page:horizontal { background: #ff0000; border-radius: 3px; }
+            QSlider::sub-page:horizontal { background: #0284c7; border-radius: 3px; }
+
+            /* Modern Ultra-Clean Scrollbar */
+            QScrollBar:vertical {
+                border: none;
+                background: transparent;
+                width: 6px;
+                margin: 0px;
+            }
+            QScrollBar::handle:vertical {
+                background: rgba(255, 255, 255, 0.22);
+                min-height: 24px;
+                border-radius: 3px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: rgba(56, 189, 248, 0.7);
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                border: none; background: none; height: 0px;
+            }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+                background: none;
+            }
+            QScrollBar:horizontal {
+                height: 0px; border: none;
+            }
+
+            /* Playlist View */
             QListWidget {
-                background: #0f0f0f; border: none; outline: none; padding: 0px;
+                background: #0f172a; border: none; outline: none; padding: 4px;
             }
             QListWidget::item {
-                padding: 10px 8px; border-bottom: 1px solid #1a1a1a;
-                color: #f1f1f1; border-radius: 6px; margin-bottom: 1px;
+                padding: 10px 12px; border-bottom: 1px solid rgba(255,255,255,0.04);
+                color: #94a3b8; border-radius: 8px; margin: 2px 2px;
+                font-size: 13px;
             }
-            QListWidget::item:hover { background: #1a1a1a; }
-            QListWidget::item:selected { background: #1a1a1a; font-weight: bold; }
+            QListWidget::item:hover {
+                background: #1e293b; color: #f8fafc;
+            }
+            QListWidget::item:selected {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #0369a1, stop:1 #0c4a6e);
+                color: #ffffff; font-weight: bold; border-left: 3px solid #38bdf8;
+            }
         """)
 
         self.main_layout = QHBoxLayout(self)
         self.main_layout.setContentsMargins(0, 0, 0, 0)
         self.main_layout.setSpacing(0)
 
-        # ── Left: Player Area ──
-        self.player_widget = QWidget()
-        self.vlayout = QVBoxLayout(self.player_widget)
-        self.vlayout.setContentsMargins(20, 20, 10, 20)
-        self.vlayout.setSpacing(15)
+        # ── Left: Video + Controls Container ──
+        self.player_widget = QWidget(self)
+        self.player_widget.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        self.player_layout = QVBoxLayout(self.player_widget)
+        self.player_layout.setContentsMargins(14, 14, 10, 14)
+        self.player_layout.setSpacing(10)
 
-        self.video_frame = QVideoWidget()
-        self.video_frame.setStyleSheet("background: #000; border-radius: 12px;")
-        self.video_frame.setMinimumSize(400, 300)
-        self.vlayout.addWidget(self.video_frame, stretch=1)
+        # Video Frame
+        self.video_frame = QVideoWidget(self.player_widget)
+        self.video_frame.setStyleSheet("background: #000000; border-radius: 10px;")
+        self.video_frame.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        self.player_layout.addWidget(self.video_frame, stretch=1)
 
         self.player = QMediaPlayer(self)
         self.audio_output = QAudioOutput(self)
@@ -404,10 +569,18 @@ class MediaPlayerWindow(QWidget):
         self.player.playbackStateChanged.connect(self._on_playback_state_changed)
         self.player.errorOccurred.connect(self._on_media_error)
 
-        # Controls
-        controls_box = QVBoxLayout()
-        controls_box.setSpacing(8)
+        # ── Bottom Controls Bar (Crystal Clear, Fully Visible) ──
+        self.controls_widget = QWidget(self.player_widget)
+        self.controls_widget.setStyleSheet("""
+            QWidget {
+                background: #111827; border-radius: 10px; padding: 4px;
+            }
+        """)
+        controls_vbox = QVBoxLayout(self.controls_widget)
+        controls_vbox.setContentsMargins(14, 8, 14, 10)
+        controls_vbox.setSpacing(6)
 
+        # Progress slider
         self.slider = QSlider(Qt.Orientation.Horizontal)
         self.slider.setRange(0, 1000)
         self.slider.setTracking(True)
@@ -415,73 +588,121 @@ class MediaPlayerWindow(QWidget):
         self.slider.sliderPressed.connect(self._on_slider_pressed)
         self.slider.sliderReleased.connect(self._on_slider_released)
         self.slider.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.slider.setMinimumHeight(20)
-        controls_box.addWidget(self.slider)
+        self.slider.setMinimumHeight(18)
+        controls_vbox.addWidget(self.slider)
         self._slider_dragging = False
 
+        # Controls row
         controls = QHBoxLayout()
+        controls.setSpacing(8)
 
-        # Cache icons
-        self._play_icon = _make_icon(_draw_play, 28)
-        self._pause_icon = _make_icon(_draw_pause, 28)
-        self._speaker_icon = _make_icon(_draw_speaker, 20)
-        self._muted_icon = _make_icon(_draw_speaker_muted, 20)
+        self._play_icon = _make_icon(_draw_play, 26, '#ffffff')
+        self._pause_icon = _make_icon(_draw_pause, 26, '#ffffff')
+        self._speaker_icon = _make_icon(_draw_speaker, 20, '#cbd5e1')
+        self._muted_icon = _make_icon(_draw_speaker_muted, 20, '#cbd5e1')
+        self._hd_icon = _make_icon(_draw_hd, 20, '#38bdf8')
+        self._playlist_icon = _make_icon(_draw_playlist_icon, 20, '#cbd5e1')
 
         self.prev_btn = QPushButton()
         self.prev_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.prev_btn.setIcon(_make_icon(_draw_prev, 24))
-        self.prev_btn.setIconSize(QSize(24, 24))
+        self.prev_btn.setIcon(_make_icon(_draw_prev, 22, '#cbd5e1'))
+        self.prev_btn.setIconSize(QSize(22, 22))
         self.prev_btn.setFixedSize(36, 36)
         self.prev_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.prev_btn.setToolTip("\u4e0a\u4e00\u66f2")
+        self.prev_btn.setToolTip("上一曲")
         self.prev_btn.clicked.connect(lambda *a: self.play_prev())
 
         self.play_btn = QPushButton()
         self.play_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.play_btn.setIcon(self._play_icon)
-        self.play_btn.setIconSize(QSize(28, 28))
-        self.play_btn.setFixedSize(42, 42)
+        self.play_btn.setIconSize(QSize(26, 26))
+        self.play_btn.setFixedSize(40, 40)
         self.play_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.play_btn.setToolTip("\u64ad\u653e / \u6682\u505c")
+        self.play_btn.setToolTip("播放 / 暂停 (快捷键: 空格)")
         self.play_btn.clicked.connect(lambda *a: self.toggle_play())
 
         self.next_btn = QPushButton()
         self.next_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.next_btn.setIcon(_make_icon(_draw_next, 24))
-        self.next_btn.setIconSize(QSize(24, 24))
+        self.next_btn.setIcon(_make_icon(_draw_next, 22, '#cbd5e1'))
+        self.next_btn.setIconSize(QSize(22, 22))
         self.next_btn.setFixedSize(36, 36)
         self.next_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.next_btn.setToolTip("\u4e0b\u4e00\u66f2")
+        self.next_btn.setToolTip("下一曲")
         self.next_btn.clicked.connect(lambda *a: self.play_next())
 
         self.vol_btn = QPushButton()
         self.vol_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.vol_btn.setIcon(self._speaker_icon)
         self.vol_btn.setIconSize(QSize(20, 20))
-        self.vol_btn.setFixedSize(28, 28)
-        self.vol_btn.setToolTip("\u97f3\u91cf")
+        self.vol_btn.setFixedSize(30, 30)
+        self.vol_btn.setToolTip("音量")
 
         self.vol_slider = QSlider(Qt.Orientation.Horizontal)
         self.vol_slider.setRange(0, 100)
         self.vol_slider.setValue(100)
-        self.vol_slider.setFixedWidth(100)
+        self.vol_slider.setMinimumWidth(40)
+        self.vol_slider.setMaximumWidth(88)
         self.vol_slider.setTracking(True)
-        self.vol_slider.setMinimumHeight(20)
+        self.vol_slider.setMinimumHeight(16)
         self.vol_slider.setCursor(Qt.CursorShape.PointingHandCursor)
         self.vol_slider.valueChanged.connect(self.set_volume)
 
         self.time_label = QLabel("00:00 / 00:00")
         self.time_label.setStyleSheet(
-            "color: #777; font-family: 'Consolas', monospace; font-size: 12px;"
+            "color: #94a3b8; font-family: 'Consolas', monospace; font-size: 12px; margin-left: 6px;"
         )
+
+        self.status_label = QLabel("")
+        self.status_label.setStyleSheet("color: #38bdf8; font-size: 11px; margin-left: 10px;")
+
+        # Custom HD quality button
+        self.quality_btn = QPushButton()
+        self.quality_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.quality_btn.setIcon(self._hd_icon)
+        self.quality_btn.setIconSize(QSize(22, 22))
+        self.quality_btn.setFixedSize(34, 34)
+        self.quality_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.quality_btn.setToolTip("画质选择 (1080p/720p/480p/360p)")
+        self.quality_btn.clicked.connect(self._show_quality_menu)
+
+        # Toggle playlist button (Manual Collapse / Expand)
+        self.toggle_playlist_btn = QPushButton()
+        self.toggle_playlist_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.toggle_playlist_btn.setIcon(self._playlist_icon)
+        self.toggle_playlist_btn.setIconSize(QSize(22, 22))
+        self.toggle_playlist_btn.setFixedSize(34, 34)
+        self.toggle_playlist_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.toggle_playlist_btn.setToolTip("折叠 / 展开播放列表")
+        self.toggle_playlist_btn.clicked.connect(self.toggle_playlist_panel)
+
+        self.always_on_top_btn = QPushButton()
+        self.always_on_top_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.always_on_top_btn.setCheckable(True)
+        self.always_on_top_btn.setChecked(False)
+        self.always_on_top_btn.setIcon(_make_dual_icon(_draw_pin, 18))
+        self.always_on_top_btn.setIconSize(QSize(18, 18))
+        self.always_on_top_btn.setFixedSize(32, 32)
+        self.always_on_top_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.always_on_top_btn.setToolTip("置顶窗口")
+        self.always_on_top_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent; border: 1px solid transparent; border-radius: 6px;
+            }
+            QPushButton:hover { background: rgba(255,255,255,0.1); }
+            QPushButton:checked { background: #0c4a6e; border-color: #38bdf8; }
+        """)
+        self.always_on_top_btn.clicked.connect(
+            lambda checked=False: self.set_always_on_top(bool(checked))
+        )
+        self._always_on_top = False
 
         self.fullscreen_btn = QPushButton()
         self.fullscreen_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.fullscreen_btn.setIcon(_make_icon(_draw_expand, 18))
+        self.fullscreen_btn.setIcon(_make_icon(_draw_expand, 18, '#cbd5e1'))
         self.fullscreen_btn.setIconSize(QSize(18, 18))
-        self.fullscreen_btn.setFixedSize(30, 30)
+        self.fullscreen_btn.setFixedSize(32, 32)
         self.fullscreen_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.fullscreen_btn.setToolTip("\u5168\u5c4f")
+        self.fullscreen_btn.setToolTip("全屏 (快捷键: Esc 退出)")
         self.fullscreen_btn.clicked.connect(lambda *a: self.toggle_fullscreen())
 
         controls.addWidget(self.prev_btn)
@@ -490,79 +711,85 @@ class MediaPlayerWindow(QWidget):
         controls.addSpacing(10)
         controls.addWidget(self.vol_btn)
         controls.addWidget(self.vol_slider)
-        controls.addSpacing(10)
         controls.addWidget(self.time_label)
+        controls.addWidget(self.status_label)
         controls.addStretch()
+        controls.addWidget(self.quality_btn)
+        controls.addWidget(self.toggle_playlist_btn)
+        controls.addWidget(self.always_on_top_btn)
         controls.addWidget(self.fullscreen_btn)
 
-        controls_box.addLayout(controls)
-        self.vlayout.addLayout(controls_box)
+        controls_vbox.addLayout(controls)
+        self.player_layout.addWidget(self.controls_widget)
 
-        self.status_label = QLabel("")
-        self.status_label.setStyleSheet("color: #555; font-size: 11px;")
-        self.vlayout.addWidget(self.status_label)
-
-        # ── Right: Queue Panel ──
-        self.queue_widget = QWidget()
-        self.queue_widget.setFixedWidth(310)
+        # ── Right: Modern Clean Collapsible Queue Panel ──
+        self.queue_widget = QWidget(self)
+        self.queue_widget.setMinimumWidth(260)
+        self.queue_widget.setMaximumWidth(320)
+        self.queue_widget.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding
+        )
         qlayout = QVBoxLayout(self.queue_widget)
-        qlayout.setContentsMargins(10, 20, 16, 20)
+        qlayout.setContentsMargins(10, 14, 14, 14)
         qlayout.setSpacing(10)
 
-        # Top row: open file button
+        # Top row: playlist header, collapse button & open file
         top_row = QHBoxLayout()
         top_row.setSpacing(6)
 
+        list_title = QLabel("播放列表")
+        list_title.setStyleSheet("font-weight: 700; font-size: 14px; color: #f8fafc;")
+        top_row.addWidget(list_title)
+        top_row.addStretch()
+
         self.open_file_btn = QPushButton()
         self.open_file_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.open_file_btn.setIcon(_make_icon(_draw_folder, 20))
-        self.open_file_btn.setIconSize(QSize(20, 20))
-        self.open_file_btn.setFixedSize(36, 36)
+        self.open_file_btn.setIcon(_make_icon(_draw_folder, 18))
+        self.open_file_btn.setIconSize(QSize(18, 18))
+        self.open_file_btn.setFixedSize(32, 32)
         self.open_file_btn.setStyleSheet(
-            "background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 6px;"
+            "background: #1e293b; border: 1px solid #334155; border-radius: 6px;"
         )
         self.open_file_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.open_file_btn.setToolTip("\u6253\u5f00\u672c\u5730\u6587\u4ef6")
+        self.open_file_btn.setToolTip("打开本地音视频文件")
         self.open_file_btn.clicked.connect(lambda *a: self.open_file())
-
-        top_row.addStretch()
         top_row.addWidget(self.open_file_btn)
         qlayout.addLayout(top_row)
 
         # Playback Mode Buttons
         mode_layout = QHBoxLayout()
-        mode_layout.setSpacing(4)
+        mode_layout.setSpacing(6)
 
         self.seq_play_btn = QPushButton()
         self.seq_play_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.seq_play_btn.setIcon(_make_dual_icon(_draw_repeat, 20))
-        self.seq_play_btn.setIconSize(QSize(20, 20))
-        self.seq_play_btn.setToolTip("\u987a\u5e8f\u64ad\u653e")
+        self.seq_play_btn.setIcon(_make_dual_icon(_draw_repeat, 18))
+        self.seq_play_btn.setIconSize(QSize(18, 18))
+        self.seq_play_btn.setToolTip("顺序播放")
 
         self.single_loop_btn = QPushButton()
         self.single_loop_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.single_loop_btn.setIcon(_make_dual_icon(_draw_repeat_one, 20))
-        self.single_loop_btn.setIconSize(QSize(20, 20))
-        self.single_loop_btn.setToolTip("\u5355\u66f2\u5faa\u73af")
+        self.single_loop_btn.setIcon(_make_dual_icon(_draw_repeat_one, 18))
+        self.single_loop_btn.setIconSize(QSize(18, 18))
+        self.single_loop_btn.setToolTip("单曲循环")
 
         self.random_play_btn = QPushButton()
         self.random_play_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.random_play_btn.setIcon(_make_dual_icon(_draw_shuffle, 20))
-        self.random_play_btn.setIconSize(QSize(20, 20))
-        self.random_play_btn.setToolTip("\u968f\u673a\u64ad\u653e")
+        self.random_play_btn.setIcon(_make_dual_icon(_draw_shuffle, 18))
+        self.random_play_btn.setIconSize(QSize(18, 18))
+        self.random_play_btn.setToolTip("随机播放")
 
         mode_btn_style = """
             QPushButton {
-                background: #1a1a1a; border: 1px solid #2a2a2a; border-radius: 6px;
+                background: #1e293b; border: 1px solid #334155; border-radius: 6px;
             }
             QPushButton:checked {
-                background: #1e3a8a; border-color: #0ea5e9;
+                background: #0284c7; border-color: #38bdf8;
             }
-            QPushButton:hover { background: #222222; }
+            QPushButton:hover { background: #334155; }
         """
         for btn in (self.seq_play_btn, self.single_loop_btn, self.random_play_btn):
             btn.setCheckable(True)
-            btn.setFixedSize(36, 36)
+            btn.setFixedSize(32, 32)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setStyleSheet(mode_btn_style)
             mode_layout.addWidget(btn)
@@ -580,18 +807,21 @@ class MediaPlayerWindow(QWidget):
         )
         self.set_play_mode(self.play_mode)
 
-        # Queue list
+        # Queue list (Horizontal scroll disabled, text wrapped)
         self.queue_list = QListWidget()
+        self.queue_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.queue_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.queue_list.setWordWrap(True)
         self.queue_list.itemDoubleClicked.connect(self._on_queue_double_click)
         self.queue_list.setCursor(Qt.CursorShape.PointingHandCursor)
         self.queue_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.queue_list.customContextMenuRequested.connect(self._queue_context_menu)
         qlayout.addWidget(self.queue_list, stretch=1)
 
-        # URL input (Standard input widget)
+        # URL input
         self.url_input = QPlainTextEdit()
-        self.url_input.setPlaceholderText("Paste URLs (one per line)")
-        self.url_input.setMaximumHeight(70)
+        self.url_input.setPlaceholderText("粘贴链接 (每行一条)")
+        self.url_input.setMaximumHeight(64)
         qlayout.addWidget(self.url_input)
 
         # Bottom buttons
@@ -600,21 +830,22 @@ class MediaPlayerWindow(QWidget):
 
         self.add_queue_btn = QPushButton()
         self.add_queue_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.add_queue_btn.setIcon(_make_icon(_draw_plus, 18, '#ffffff'))
-        self.add_queue_btn.setIconSize(QSize(18, 18))
+        self.add_queue_btn.setIcon(_make_icon(_draw_plus, 16, '#ffffff'))
+        self.add_queue_btn.setIconSize(QSize(16, 16))
         self.add_queue_btn.setObjectName("primary")
-        self.add_queue_btn.setFixedHeight(34)
+        self.add_queue_btn.setFixedHeight(32)
         self.add_queue_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.add_queue_btn.setToolTip("\u6dfb\u52a0\u5230\u64ad\u653e\u5217\u8868")
+        self.add_queue_btn.setToolTip("添加到播放列表")
         self.add_queue_btn.clicked.connect(lambda *a: self.add_to_queue())
 
         self.clear_queue_btn = QPushButton()
         self.clear_queue_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.clear_queue_btn.setIcon(_make_icon(_draw_clear, 16, '#888888'))
+        self.clear_queue_btn.setIcon(_make_icon(_draw_clear, 16, '#94a3b8'))
         self.clear_queue_btn.setIconSize(QSize(16, 16))
-        self.clear_queue_btn.setFixedHeight(34)
+        self.clear_queue_btn.setFixedHeight(32)
+        self.clear_queue_btn.setStyleSheet("background:#1e293b; border:1px solid #334155; border-radius:6px;")
         self.clear_queue_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.clear_queue_btn.setToolTip("\u6e05\u7a7a\u64ad\u653e\u5217\u8868")
+        self.clear_queue_btn.setToolTip("清空播放列表")
         self.clear_queue_btn.clicked.connect(lambda *a: self.clear_queue())
 
         btn_layout.addWidget(self.add_queue_btn, stretch=3)
@@ -624,7 +855,7 @@ class MediaPlayerWindow(QWidget):
         self.main_layout.addWidget(self.player_widget, stretch=1)
         self.main_layout.addWidget(self.queue_widget)
 
-        # Timer (guarded by _vlc_ready and _is_changing_media in update_ui)
+        # Timer
         self.timer = QTimer(self)
         self.timer.setInterval(500)
         self.timer.timeout.connect(self.update_ui)
@@ -638,7 +869,8 @@ class MediaPlayerWindow(QWidget):
         self.extractor.limit_reached.connect(self._on_extract_limit)
 
         self.stream_worker = YtDlpStreamWorker()
-        self.stream_worker.stream_extracted.connect(self._on_stream_extracted)
+        self.stream_worker.media_ready.connect(self._on_media_ready)
+        self.stream_worker.media_status.connect(self._on_media_status)
         self.stream_worker.error.connect(self._on_stream_error)
 
         # Playback state
@@ -648,57 +880,164 @@ class MediaPlayerWindow(QWidget):
         self.is_fullscreen = False
         self._extract_limited = False
 
-        # Keep the queue across full application restarts. State writes are
-        # debounced so importing a large playlist does not block the UI once
-        # per item; closeEvent still performs an immediate final flush.
         self._playlist_save_timer = QTimer(self)
         self._playlist_save_timer.setSingleShot(True)
         self._playlist_save_timer.setInterval(200)
         self._playlist_save_timer.timeout.connect(self._flush_playlist_state)
         self._restore_playlist()
 
-    # ── Asynchronous Qt Multimedia backend ──
+    # ── Highlighting & Auto Scrolling ──
+
+    def _scroll_to_current_playlist_item(self):
+        if 0 <= self.current_index < self.queue_list.count():
+            item = self.queue_list.item(self.current_index)
+            self.queue_list.setCurrentItem(item)
+            self.queue_list.scrollToItem(item, QListWidget.ScrollHint.PositionAtCenter)
+
+    # ── Player Events ──
 
     def _ensure_vlc(self) -> bool:
-        """Compatibility shim retained for existing call sites."""
         return self.player is not None
-
-    def _on_vlc_end_reached_c_callback(self, event):
-        QTimer.singleShot(0, self.play_next)
 
     def _on_media_status_changed(self, status) -> None:
         if status == QMediaPlayer.MediaStatus.EndOfMedia:
             QTimer.singleShot(0, self.play_next)
+        elif status in {
+            QMediaPlayer.MediaStatus.LoadedMedia,
+            QMediaPlayer.MediaStatus.BufferedMedia,
+        }:
+            self._media_retry_pending = False
+            self._trigger_next_prefetch()
 
     def _on_playback_state_changed(self, state) -> None:
         playing = state == QMediaPlayer.PlaybackState.PlayingState
         self.is_playing_state = playing
         self.play_btn.setIcon(self._pause_icon if playing else self._play_icon)
 
-    def _on_media_error(self, *args) -> None:
-        message = self.player.errorString() if self.player else ""
-        self.status_label.setText(f"播放失败：{message or '无法打开该媒体文件'}")
+    def _on_media_error(self, error=None, error_string="") -> None:
+        if self._media_retry_pending:
+            return
+        message = str(error_string or (self.player.errorString() if self.player else ""))
+        labels = {
+            QMediaPlayer.Error.ResourceError: "资源地址失效",
+            QMediaPlayer.Error.FormatError: "媒体格式不兼容",
+            QMediaPlayer.Error.NetworkError: "网络连接失败",
+            QMediaPlayer.Error.AccessDeniedError: "视频需要权限或登录",
+        }
+        label = labels.get(error, "无法打开媒体")
+        req_id = self._current_request_id
+        self._finish_media_failure(req_id, label, message)
+
+    # ── Quality Selector Menu ──
+
+    def _show_quality_menu(self):
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #0f172a; border: 1px solid #1e293b;
+                border-radius: 8px; padding: 6px; color: #f8fafc;
+            }
+            QMenu::item {
+                padding: 6px 22px 6px 16px; border-radius: 6px; font-size: 12px;
+            }
+            QMenu::item:selected {
+                background-color: #0284c7; color: #ffffff;
+            }
+        """)
+
+        auto_action = QAction("自动 (最高画质)", menu)
+        auto_action.setCheckable(True)
+        auto_action.setChecked(self._selected_quality_height == 0)
+        auto_action.triggered.connect(lambda: self._select_quality(0))
+        menu.addAction(auto_action)
+        menu.addSeparator()
+
+        for h in [1080, 720, 480, 360]:
+            label = f"{h}p HD" if h >= 720 else f"{h}p"
+            action = QAction(label, menu)
+            action.setCheckable(True)
+            action.setChecked(self._selected_quality_height == h)
+            action.triggered.connect(lambda checked=False, height=h: self._select_quality(height))
+            menu.addAction(action)
+
+        menu.exec(self.quality_btn.mapToGlobal(QPointF(0, -menu.sizeHint().height()).toPoint()))
+
+    def _select_quality(self, height: int):
+        self._selected_quality_height = height
+        if self.current_index < 0:
+            return
+
+        current_pos = self.player.position() if self.player else 0
+        title, url = self.playlist[self.current_index]
+        if url.startswith("http"):
+            self._current_request_id += 1
+            req_id = self._current_request_id
+            self.stream_worker.cancel()
+            self.stream_worker.load_media(req_id, url, self._selected_quality_height, self._media_cache_dir)
+            self._pending_seek_pos = current_pos
+
+    # ── Pre-fetching Next Video ──
+
+    def _trigger_next_prefetch(self):
+        if len(self.playlist) <= 1:
+            return
+        nxt = self.current_index + 1
+        if nxt >= len(self.playlist):
+            if self.play_mode == "sequence":
+                nxt = 0
+            else:
+                return
+        _title, next_url = self.playlist[nxt]
+        if next_url.startswith("http"):
+            self.stream_worker.prefetch(next_url, self._selected_quality_height, self._media_cache_dir)
 
     # ── Player Controls ──
 
     def set_window_id(self):
-        # QVideoWidget is already connected with setVideoOutput().
         return
+
+    def toggle_playlist_panel(self):
+        """Toggle right side playlist panel visibility."""
+        is_visible = self.queue_widget.isVisible()
+        self.queue_widget.setVisible(not is_visible)
+        self.toggle_playlist_btn.setToolTip("展开播放列表" if is_visible else "折叠播放列表")
+        if not is_visible:
+            self._scroll_to_current_playlist_item()
 
     def toggle_fullscreen(self):
         self.is_fullscreen = not self.is_fullscreen
         if self.is_fullscreen:
             self.queue_widget.hide()
-            self.vlayout.setContentsMargins(0, 0, 0, 0)
             self.showFullScreen()
         else:
             self.queue_widget.show()
-            self.vlayout.setContentsMargins(20, 20, 10, 20)
             self.showNormal()
+
+    def set_always_on_top(self, enabled: bool):
+        enabled = bool(enabled)
+        if enabled == self._always_on_top:
+            return
+
+        was_fullscreen = self.isFullScreen() or self.is_fullscreen
+        normal_geometry = None if was_fullscreen else self.saveGeometry()
+
+        self._always_on_top = enabled
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, enabled)
+
+        if was_fullscreen:
+            self.showFullScreen()
+        else:
+            self.show()
+            if normal_geometry is not None:
+                self.restoreGeometry(normal_geometry)
+
+        self.always_on_top_btn.setToolTip("取消置顶" if enabled else "置顶窗口")
 
     def keyPressEvent(self, event: QKeyEvent):
         if event.key() == Qt.Key.Key_Escape and self.is_fullscreen:
             self.toggle_fullscreen()
+        elif event.key() == Qt.Key.Key_Space:
+            self.toggle_play()
         super().keyPressEvent(event)
 
     def set_volume(self, value):
@@ -718,7 +1057,6 @@ class MediaPlayerWindow(QWidget):
     def play(self):
         if not self._ensure_vlc():
             return
-        self.set_window_id()
         self.player.play()
         self.is_playing_state = True
         self.play_btn.setIcon(self._pause_icon)
@@ -775,8 +1113,6 @@ class MediaPlayerWindow(QWidget):
         for title, _url in restored:
             self.queue_list.addItem(title)
 
-        # Do not auto-play on application startup. Invalid or missing entries
-        # are removed from the in-memory state and disappear on the next save.
         media_cfg["playlist"] = [
             {"title": title, "url": url} for title, url in self.playlist
         ]
@@ -823,7 +1159,6 @@ class MediaPlayerWindow(QWidget):
             self._persist_playlist()
             if self.current_index == -1 and self.playlist:
                 self.status_label.setText(f"已导入 {min(len(filenames), remaining)} 个本地文件")
-                # Return from the modal file dialog before starting playback.
                 QTimer.singleShot(0, self.play_next)
 
     def set_buttons_enabled(self, enabled: bool):
@@ -861,6 +1196,7 @@ class MediaPlayerWindow(QWidget):
 
     def clear_queue(self):
         self.extractor.cancel()
+        self.stream_worker.cancel()
         self.set_buttons_enabled(True)
         self.playlist.clear()
         self.queue_list.clear()
@@ -907,7 +1243,7 @@ class MediaPlayerWindow(QWidget):
             return
         menu = QMenu(self)
         idx = self.queue_list.row(item)
-        remove_action = QAction("Remove", menu)
+        remove_action = QAction("移除此项", menu)
         remove_action.triggered.connect(lambda *a, i=idx: self._remove_item(i))
         menu.addAction(remove_action)
         menu.exec(self.queue_list.mapToGlobal(pos))
@@ -935,7 +1271,6 @@ class MediaPlayerWindow(QWidget):
         if self.play_mode == "single_loop":
             self.play_index(max(0, self.current_index))
         elif self.play_mode == "random":
-            import random
             self.play_index(random.randint(0, len(self.playlist) - 1))
         else:
             nxt = self.current_index + 1
@@ -952,30 +1287,65 @@ class MediaPlayerWindow(QWidget):
         if index < 0 or index >= len(self.playlist):
             return
         self.current_index = index
-        self.queue_list.setCurrentRow(index)
+        self._scroll_to_current_playlist_item()
+
         self._current_request_id += 1
         req_id = self._current_request_id
+        self.stream_worker.cancel()
+        self._online_source_url = ""
+        self._media_retry_pending = False
+        self._pending_seek_pos = 0
 
         title, url = self.playlist[index]
         if url.startswith("http"):
-            self.status_label.setText(f"Loading: {title}...")
-            self.stream_worker.extract(req_id, url)
+            self._online_source_url = url
+            self.stream_worker.load_media(req_id, url, self._selected_quality_height, self._media_cache_dir)
         else:
             self._play_stream(req_id, title, url)
 
-    def _on_stream_extracted(self, req_id: int, stream_url: str):
-        if req_id != self._current_request_id:
-            return  # Discard stale request response
-        if self.current_index >= 0:
-            title = self.playlist[self.current_index][0]
-            self._play_stream(req_id, title, stream_url)
+    def _on_media_status(self, req_id: int, message: str):
+        if req_id == self._current_request_id:
+            self.status_label.setText(message)
+
+    def _on_media_ready(self, req_id: int, path: str, height: int):
+        if req_id != self._current_request_id or self.current_index < 0:
+            return
+        self._media_retry_pending = False
+        title = self.playlist[self.current_index][0]
+        q_label = f" [{height}p]" if height > 0 else ""
+        self.status_label.setText(f"{title}{q_label}")
+        seek_pos = getattr(self, "_pending_seek_pos", 0)
+        self._pending_seek_pos = 0
+        self._play_stream(req_id, title, path, seek_pos_ms=seek_pos)
 
     def _on_stream_error(self, req_id: int, err: str):
         if req_id != self._current_request_id:
             return
-        self.status_label.setText(f"Error: {err}")
+        self._finish_media_failure(req_id, "加载失败", str(err))
 
-    def _play_stream(self, req_id: int, title: str, uri: str):
+    def _finish_media_failure(self, req_id: int, label: str, detail: str):
+        if req_id != self._current_request_id or self._media_retry_pending:
+            return
+        self._media_retry_pending = True
+        short_detail = detail.strip() or "未知原因"
+        if len(short_detail) > 120:
+            short_detail = short_detail[:117] + "…"
+        self.status_label.setText(f"播放失败：{label}（{short_detail}），即将播放下一项")
+        self.is_playing_state = False
+        self.play_btn.setIcon(self._play_icon)
+        QTimer.singleShot(1500, lambda r=req_id: self._advance_after_failure(r))
+
+    def _advance_after_failure(self, req_id: int):
+        if req_id != self._current_request_id:
+            return
+        self._media_retry_pending = False
+        if len(self.playlist) <= 1:
+            self.status_label.setText("播放失败：列表中没有其他可播放项目")
+            return
+        nxt = (max(self.current_index, 0) + 1) % len(self.playlist)
+        self.play_index(nxt)
+
+    def _play_stream(self, req_id: int, title: str, uri: str, seek_pos_ms: int = 0):
         if req_id != self._current_request_id:
             return
         if not self._ensure_vlc():
@@ -987,10 +1357,12 @@ class MediaPlayerWindow(QWidget):
             self.player.setSource(source)
             self.audio_output.setVolume(self.vol_slider.value() / 100.0)
             self.player.play()
+            if seek_pos_ms > 0:
+                QTimer.singleShot(300, lambda p=seek_pos_ms: self.player.setPosition(p))
             self.is_playing_state = True
             self.play_btn.setIcon(self._pause_icon)
-            self.status_label.setText(title)
             self.setWindowTitle(f"Clock/Alarm - {title}")
+            self._scroll_to_current_playlist_item()
         finally:
             self._is_changing_media = False
 
@@ -1040,10 +1412,12 @@ class MediaPlayerWindow(QWidget):
                 pass
 
     def closeEvent(self, event):
+        self.stream_worker.cancel()
         if self._vlc_ready and self.player:
             try:
                 self.player.stop()
             except Exception:
                 pass
         self._persist_playlist(immediate=True)
+        shutil.rmtree(self._media_cache_dir, ignore_errors=True)
         event.accept()
