@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Callable
 
 import numpy as np
-from PyQt6.QtCore import QEvent, QPoint, QPointF, QRect, QRectF, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QByteArray, QBuffer, QIODevice, QMimeData, QEvent, QPoint, QPointF, QRect, QRectF, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QBrush,
     QColor,
@@ -166,6 +166,32 @@ DOCK_COLORS = [
     QColor(255, 255, 255),
     QColor(15, 23, 42),
 ]
+
+
+def copy_image_to_clipboard(image: QImage) -> None:
+    """Robust clipboard copier supporting image/png, BMP and native clipboard formats."""
+    cb = QApplication.clipboard()
+    if cb is None or image.isNull():
+        return
+    formatted = image.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
+    mime = QMimeData()
+    mime.setImageData(formatted)
+
+    png_ba = QByteArray()
+    png_buf = QBuffer(png_ba)
+    png_buf.open(QIODevice.OpenModeFlag.WriteOnly)
+    formatted.save(png_buf, "PNG")
+    png_buf.close()
+    mime.setData("image/png", png_ba)
+
+    bmp_ba = QByteArray()
+    bmp_buf = QBuffer(bmp_ba)
+    bmp_buf.open(QIODevice.OpenModeFlag.WriteOnly)
+    formatted.save(bmp_buf, "BMP")
+    bmp_buf.close()
+    mime.setData("image/bmp", bmp_ba)
+
+    cb.setMimeData(mime)
 
 
 class PinnedShot(QWidget):
@@ -1583,7 +1609,7 @@ class ScreenshotEditor(QWidget):
                 QMessageBox.information(self, "截图", "请先框选有效区域")
             return
         if act == "copy":
-            QApplication.clipboard().setImage(img)
+            copy_image_to_clipboard(img)
             self._finish_ok(img)
             return
         if act == "pin":
@@ -1592,13 +1618,14 @@ class ScreenshotEditor(QWidget):
             pin.move(self.desk_geo.x() + self.sel.x() + 20, self.desk_geo.y() + self.sel.y() + 20)
             pin.show()
             self._pinned.append(pin)
+            _PINNED_REFS.append(pin)
             self._finish_ok(img)
             return
         if act == "accept":
             # auto save + copy image then exit
             path = self._default_save_dir() / f"shot_{time.strftime('%Y%m%d_%H%M%S')}.png"
             img.save(str(path))
-            QApplication.clipboard().setImage(img)
+            copy_image_to_clipboard(img)
             self._finish_ok(img)
             return
 
