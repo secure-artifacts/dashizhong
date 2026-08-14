@@ -8,6 +8,7 @@ from PyQt6.QtWidgets import (
     QCheckBox,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -341,8 +342,21 @@ class SettingsDialog(_StyledDialog):
         browse_btn.setFixedWidth(75)
         
         def _choose_dir():
-            from PyQt6.QtWidgets import QFileDialog
-            chosen = QFileDialog.getExistingDirectory(self, "选择截图保存文件夹", self.screenshot_save_dir.text())
+            current_val = self.screenshot_save_dir.text().strip() or default_dir
+            try:
+                chosen = QFileDialog.getExistingDirectory(
+                    self,
+                    "选择截图保存文件夹",
+                    current_val,
+                    QFileDialog.Option.ShowDirsOnly | QFileDialog.Option.DontResolveSymlinks
+                )
+            except Exception:
+                chosen = QFileDialog.getExistingDirectory(
+                    self,
+                    "选择截图保存文件夹",
+                    current_val,
+                    QFileDialog.Option.DontUseNativeDialog
+                )
             if chosen:
                 self.screenshot_save_dir.setText(chosen)
                 
