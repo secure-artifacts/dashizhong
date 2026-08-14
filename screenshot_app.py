@@ -172,12 +172,12 @@ def copy_image_to_clipboard(image: QImage) -> None:
     """Robust clipboard copier injecting both Qt multi-format MIME and Windows CF_DIB."""
     if image is None or image.isNull():
         return
-    formatted = image.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
     
-    # 1. Qt Clipboard
+    # 1. Qt Clipboard (PNG / ARGB32)
     cb = QApplication.clipboard()
     if cb is not None:
         try:
+            formatted = image.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
             mime = QMimeData()
             mime.setImageData(formatted)
 
@@ -190,21 +190,28 @@ def copy_image_to_clipboard(image: QImage) -> None:
 
             cb.setMimeData(mime)
         except Exception:
-            cb.setImage(formatted)
+            cb.setImage(image)
 
-    # 2. Windows Native Win32 CF_DIB (Guarantees WeChat/QQ/Office/Photoshop/Browser paste)
+    # 2. Windows Native Win32 CF_DIB (Standard 24-bit RGB DIB)
     if sys.platform == "win32":
         try:
             import ctypes
             from ctypes import wintypes
+            import io
+            from PIL import Image as PilImage
 
-            ba = QByteArray()
-            buf = QBuffer(ba)
-            buf.open(QIODevice.OpenModeFlag.WriteOnly)
-            # Save 24/32-bit BMP to buffer
-            formatted.save(buf, "BMP")
-            buf.close()
-            raw_bmp = bytes(ba.data())
+            # Convert QImage to pure 24-bit RGB PIL Image to avoid BMP Premultiplied Alpha issues
+            rgb_img = image.convertToFormat(QImage.Format.Format_RGBA8888)
+            ptr = rgb_img.bits()
+            ptr.setsize(rgb_img.sizeInBytes())
+            arr = np.frombuffer(ptr, np.uint8).reshape((rgb_img.height(), rgb_img.width(), 4))
+            pil_img = PilImage.fromarray(arr, "RGBA").convert("RGB")
+            
+            output = io.BytesIO()
+            pil_img.save(output, "BMP")
+            raw_bmp = output.getvalue()
+            output.close()
+
             if len(raw_bmp) > 14:
                 dib_data = raw_bmp[14:]  # Strip 14-byte BITMAPFILEHEADER to get CF_DIB
                 user32 = ctypes.windll.user32
@@ -221,6 +228,7 @@ def copy_image_to_clipboard(image: QImage) -> None:
                 CF_DIB = 8
 
                 if user32.OpenClipboard(None):
+                    user32.EmptyClipboard()
                     h_mem = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(dib_data))
                     if h_mem:
                         ptr = kernel32.GlobalLock(h_mem)
