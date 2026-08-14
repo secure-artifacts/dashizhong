@@ -529,9 +529,21 @@ class ScreenshotEditor(QWidget):
         c = self._shortcut_label("copy") or "Ctrl+C"
         s = self._shortcut_label("save") or "Ctrl+S"
         p = self._shortcut_label("pin") or "Ctrl+P"
-        self._status_hint = f"滚轮调粗细 · {c}复制 · {s}保存 · {p}图钉 · Esc取消"
+        
+        # Auto-copy to clipboard if enabled in settings (default True)
+        if self.cfg.get("auto_copy", True):
+            img = self.export_image()
+            if img is not None and not img.isNull():
+                copy_image_to_clipboard(img)
+                self._status_hint = f"已自动复制到剪贴板 · {c}复制 · {s}保存 · {p}图钉 · Esc取消"
+            else:
+                self._status_hint = f"滚轮调粗细 · {c}复制 · {s}保存 · {p}图钉 · Esc取消"
+        else:
+            self._status_hint = f"滚轮调粗细 · {c}复制 · {s}保存 · {p}图钉 · Esc取消"
+
         self._rebuild_dock()
         self.activateWindow()
+        self.raise_()
         self.setFocus(Qt.FocusReason.OtherFocusReason)
         self.update()
 
@@ -1610,6 +1622,12 @@ class ScreenshotEditor(QWidget):
             return
         if act == "copy":
             copy_image_to_clipboard(img)
+            if self.cfg.get("auto_save", False):
+                try:
+                    path = self._default_save_dir() / f"shot_{time.strftime('%Y%m%d_%H%M%S')}.png"
+                    img.save(str(path))
+                except Exception:
+                    pass
             self._finish_ok(img)
             return
         if act == "pin":
@@ -1622,10 +1640,14 @@ class ScreenshotEditor(QWidget):
             self._finish_ok(img)
             return
         if act == "accept":
-            # auto save + copy image then exit
-            path = self._default_save_dir() / f"shot_{time.strftime('%Y%m%d_%H%M%S')}.png"
-            img.save(str(path))
+            # auto copy + conditional auto save then exit
             copy_image_to_clipboard(img)
+            if self.cfg.get("auto_save", True):
+                try:
+                    path = self._default_save_dir() / f"shot_{time.strftime('%Y%m%d_%H%M%S')}.png"
+                    img.save(str(path))
+                except Exception:
+                    pass
             self._finish_ok(img)
             return
 

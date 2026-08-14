@@ -14,6 +14,7 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
+    QPushButton,
     QScrollArea,
     QSpinBox,
     QVBoxLayout,
@@ -312,6 +313,46 @@ class SettingsDialog(_StyledDialog):
         media_form.addRow("单次播放列表上限", self.playlist_limit)
         layout.addWidget(media_group)
 
+        # Screenshot & Clipboard Section
+        screenshot_group = QGroupBox("截图与剪贴板")
+        screenshot_form = QFormLayout(screenshot_group)
+        screenshot_cfg = state.setdefault("screenshot", {})
+        
+        self.screenshot_auto_copy = QCheckBox("截图框选完成后自动复制到剪贴板")
+        self.screenshot_auto_copy.setChecked(bool(screenshot_cfg.get("auto_copy", True)))
+        screenshot_form.addRow(self.screenshot_auto_copy)
+        
+        self.screenshot_auto_save = QCheckBox("截图完成后自动保存图片到本地")
+        self.screenshot_auto_save.setChecked(bool(screenshot_cfg.get("auto_save", True)))
+        screenshot_form.addRow(self.screenshot_auto_save)
+        
+        dir_widget = QWidget()
+        dir_layout = QHBoxLayout(dir_widget)
+        dir_layout.setContentsMargins(0, 0, 0, 0)
+        dir_layout.setSpacing(6)
+        
+        from pathlib import Path
+        default_dir = str(Path.home() / "Pictures" / "ParrotScreenshots")
+        self.screenshot_save_dir = QLineEdit()
+        self.screenshot_save_dir.setText(str(screenshot_cfg.get("save_dir") or default_dir))
+        self.screenshot_save_dir.setPlaceholderText("选择保存截图的文件夹")
+        
+        browse_btn = QPushButton("浏览…")
+        browse_btn.setFixedWidth(75)
+        
+        def _choose_dir():
+            from PyQt6.QtWidgets import QFileDialog
+            chosen = QFileDialog.getExistingDirectory(self, "选择截图保存文件夹", self.screenshot_save_dir.text())
+            if chosen:
+                self.screenshot_save_dir.setText(chosen)
+                
+        browse_btn.clicked.connect(_choose_dir)
+        dir_layout.addWidget(self.screenshot_save_dir)
+        dir_layout.addWidget(browse_btn)
+        
+        screenshot_form.addRow("截图保存目录", dir_widget)
+        layout.addWidget(screenshot_group)
+
         # Global Hotkey Customization Section
         hotkey_group = QGroupBox("全局快捷键自定义")
         hotkey_layout = QVBoxLayout(hotkey_group)
@@ -401,6 +442,14 @@ class SettingsDialog(_StyledDialog):
         media = self.state.setdefault("media", {})
         media["allow_online"] = self.allow_online.isChecked()
         media["playlist_limit"] = int(self.playlist_limit.value())
+
+        # Save Screenshot configuration
+        screenshot_cfg = self.state.setdefault("screenshot", {})
+        screenshot_cfg["auto_copy"] = self.screenshot_auto_copy.isChecked()
+        screenshot_cfg["auto_save"] = self.screenshot_auto_save.isChecked()
+        save_dir_text = self.screenshot_save_dir.text().strip()
+        if save_dir_text:
+            screenshot_cfg["save_dir"] = save_dir_text
 
         # Save Hotkeys configuration
         hotkeys_cfg = self.state.setdefault("hotkeys_config", {})

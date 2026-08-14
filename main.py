@@ -424,6 +424,14 @@ def main() -> int:
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
                 "ClockAlarm.DesktopToolkit"
             )
+            # Enable Per-Monitor DPI Awareness V2 (-4) or fallback to Per-Monitor Aware (-3)
+            try:
+                ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+            except Exception:
+                try:
+                    ctypes.windll.shcore.SetProcessDpiAwareness(2)
+                except Exception:
+                    ctypes.windll.user32.SetProcessDPIAware()
         except Exception:
             pass
     app = QApplication(sys.argv)
