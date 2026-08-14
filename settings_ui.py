@@ -343,20 +343,12 @@ class SettingsDialog(_StyledDialog):
         
         def _choose_dir():
             current_val = self.screenshot_save_dir.text().strip() or default_dir
-            try:
-                chosen = QFileDialog.getExistingDirectory(
-                    self,
-                    "选择截图保存文件夹",
-                    current_val,
-                    QFileDialog.Option.ShowDirsOnly | QFileDialog.Option.DontResolveSymlinks
-                )
-            except Exception:
-                chosen = QFileDialog.getExistingDirectory(
-                    self,
-                    "选择截图保存文件夹",
-                    current_val,
-                    QFileDialog.Option.DontUseNativeDialog
-                )
+            chosen = QFileDialog.getExistingDirectory(
+                None,
+                "选择截图保存文件夹",
+                current_val,
+                QFileDialog.Option.ShowDirsOnly | QFileDialog.Option.DontUseNativeDialog
+            )
             if chosen:
                 self.screenshot_save_dir.setText(chosen)
                 
