@@ -4,6 +4,7 @@ import datetime
 import uuid
 import os
 import sys
+from pathlib import Path
 from PyQt6.QtCore import Qt, QTimer, QPoint, QTime, QSize
 from PyQt6.QtGui import QColor, QFont, QFontMetrics, QPainter, QIcon, QFontDatabase, QMouseEvent, QGuiApplication
 from PyQt6.QtWidgets import (
@@ -215,11 +216,17 @@ class FloatingWorldClock(QWidget):
         self.state_dict = state_dict
         self.host = host
         
-        # Load custom digital font
-        font_root = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(__file__)
-        font_path = os.path.join(font_root, "assets", "fonts", "DS-DIGI.TTF")
-        if os.path.exists(font_path):
-            QFontDatabase.addApplicationFont(font_path)
+        from skin import bundle_root
+        font_candidates = [
+            bundle_root() / "assets" / "fonts" / "DS-DIGI.TTF",
+            Path(__file__).resolve().parent / "assets" / "fonts" / "DS-DIGI.TTF",
+            Path(sys.executable).resolve().parent / "app" / "assets" / "fonts" / "DS-DIGI.TTF",
+            Path(sys.executable).resolve().parent / "assets" / "fonts" / "DS-DIGI.TTF",
+        ]
+        for fpath in font_candidates:
+            if fpath.is_file():
+                QFontDatabase.addApplicationFont(str(fpath))
+                break
 
         self.is_pinned = True
         self._drag_pos = None
