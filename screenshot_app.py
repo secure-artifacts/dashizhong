@@ -169,29 +169,68 @@ DOCK_COLORS = [
 
 
 def copy_image_to_clipboard(image: QImage) -> None:
-    """Robust clipboard copier supporting image/png, BMP and native clipboard formats."""
-    cb = QApplication.clipboard()
-    if cb is None or image.isNull():
+    """Robust clipboard copier injecting both Qt multi-format MIME and Windows CF_DIB."""
+    if image is None or image.isNull():
         return
     formatted = image.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied)
-    mime = QMimeData()
-    mime.setImageData(formatted)
+    
+    # 1. Qt Clipboard
+    cb = QApplication.clipboard()
+    if cb is not None:
+        try:
+            mime = QMimeData()
+            mime.setImageData(formatted)
 
-    png_ba = QByteArray()
-    png_buf = QBuffer(png_ba)
-    png_buf.open(QIODevice.OpenModeFlag.WriteOnly)
-    formatted.save(png_buf, "PNG")
-    png_buf.close()
-    mime.setData("image/png", png_ba)
+            png_ba = QByteArray()
+            png_buf = QBuffer(png_ba)
+            png_buf.open(QIODevice.OpenModeFlag.WriteOnly)
+            formatted.save(png_buf, "PNG")
+            png_buf.close()
+            mime.setData("image/png", png_ba)
 
-    bmp_ba = QByteArray()
-    bmp_buf = QBuffer(bmp_ba)
-    bmp_buf.open(QIODevice.OpenModeFlag.WriteOnly)
-    formatted.save(bmp_buf, "BMP")
-    bmp_buf.close()
-    mime.setData("image/bmp", bmp_ba)
+            cb.setMimeData(mime)
+        except Exception:
+            cb.setImage(formatted)
 
-    cb.setMimeData(mime)
+    # 2. Windows Native Win32 CF_DIB (Guarantees WeChat/QQ/Office/Photoshop/Browser paste)
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            ba = QByteArray()
+            buf = QBuffer(ba)
+            buf.open(QIODevice.OpenModeFlag.WriteOnly)
+            # Save 24/32-bit BMP to buffer
+            formatted.save(buf, "BMP")
+            buf.close()
+            raw_bmp = bytes(ba.data())
+            if len(raw_bmp) > 14:
+                dib_data = raw_bmp[14:]  # Strip 14-byte BITMAPFILEHEADER to get CF_DIB
+                user32 = ctypes.windll.user32
+                kernel32 = ctypes.windll.kernel32
+
+                kernel32.GlobalAlloc.restype = wintypes.HGLOBAL
+                kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+                kernel32.GlobalLock.restype = ctypes.c_void_p
+                kernel32.GlobalLock.argtypes = [wintypes.HGLOBAL]
+                kernel32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
+                user32.SetClipboardData.argtypes = [wintypes.UINT, wintypes.HANDLE]
+
+                GMEM_MOVEABLE = 0x0002
+                CF_DIB = 8
+
+                if user32.OpenClipboard(None):
+                    h_mem = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(dib_data))
+                    if h_mem:
+                        ptr = kernel32.GlobalLock(h_mem)
+                        if ptr:
+                            ctypes.memmove(ptr, dib_data, len(dib_data))
+                            kernel32.GlobalUnlock(h_mem)
+                            user32.SetClipboardData(CF_DIB, h_mem)
+                    user32.CloseClipboard()
+        except Exception:
+            pass
 
 
 class PinnedShot(QWidget):
