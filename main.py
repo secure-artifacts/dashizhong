@@ -173,7 +173,22 @@ class ClockAlarmApp(QObject):
     def start_screenshot_region(self) -> None:
         from screenshot_app import start_screenshot
 
-        start_screenshot(state=self.store.state)
+        # Temporarily hide desktop floating widgets so screenshot captures a clean desktop
+        hidden_windows = []
+        for board in (self.world_clock_board, self.recorder_board, self.todo_board, self.media_player_board):
+            if board is not None and board.isVisible():
+                board.hide()
+                hidden_windows.append(board)
+
+        def _on_screenshot_done(_image) -> None:
+            # Restore hidden floating windows
+            for board in hidden_windows:
+                try:
+                    board.show()
+                except Exception:
+                    pass
+
+        start_screenshot(state=self.store.state, on_done=_on_screenshot_done)
 
     def rebind_screenshot_hotkeys(self) -> str:
         result = self.hotkeys.rebind()

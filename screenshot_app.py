@@ -634,6 +634,11 @@ class ScreenshotEditor(QWidget):
     def _is_near_border(self, pt: QPoint) -> bool:
         if self.sel.isNull():
             return False
+        # Do not treat points on the dock panel as border drag
+        if not self._dock_panel.isNull() and self._dock_panel.adjusted(-6, -6, 6, 6).contains(pt):
+            return False
+        if not self._sub_dock_panel.isNull() and self._sub_dock_panel.adjusted(-6, -6, 6, 6).contains(pt):
+            return False
         s = self.sel.normalized()
         margin = 6
         on_left = abs(pt.x() - s.left()) <= margin and s.top() <= pt.y() <= s.bottom()
@@ -643,6 +648,11 @@ class ScreenshotEditor(QWidget):
         return on_left or on_right or on_top or on_bottom
 
     def _hit_handle(self, pt: QPoint) -> str:
+        # If hovering/clicking over dock, never activate resize handles
+        if not self._dock_panel.isNull() and self._dock_panel.adjusted(-4, -4, 4, 4).contains(pt):
+            return ""
+        if not self._sub_dock_panel.isNull() and self._sub_dock_panel.adjusted(-4, -4, 4, 4).contains(pt):
+            return ""
         handles = self._get_handles()
         for k, rect in handles.items():
             if rect.adjusted(-4, -4, 4, 4).contains(pt):
