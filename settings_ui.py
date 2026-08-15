@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QKeySequenceEdit,
     QLineEdit,
     QMessageBox,
     QPushButton,
@@ -31,17 +32,15 @@ from cleaner import CLEAN_SCOPES, DEFAULT_SCOPES
 RISKY_CLEAN_SCOPES = {"prefetch", "recycle", "wu", "delivery"}
 
 
-class HotkeyKeySequenceEdit(QLineEdit):
+class HotkeyKeySequenceEdit(QKeySequenceEdit):
     """Interactive hotkey recorder widget that captures key presses seamlessly."""
 
     def __init__(self, default_text: str = "", parent=None):
-        super().__init__(default_text, parent)
-        self.setPlaceholderText("请直接按下快捷键（如 Ctrl+Alt+A）")
-        self.setReadOnly(True)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        super().__init__(parent)
+        self.setKeySequence(QKeySequence(default_text))
         self.setStyleSheet(
             """
-            QLineEdit {
+            QKeySequenceEdit {
                 background: #0f172a;
                 color: #38bdf8;
                 border: 1px solid #0284c7;
@@ -49,7 +48,7 @@ class HotkeyKeySequenceEdit(QLineEdit):
                 padding: 5px 8px;
                 font-weight: 700;
             }
-            QLineEdit:focus {
+            QKeySequenceEdit:focus {
                 background: #1e293b;
                 border: 2px solid #38bdf8;
                 color: #fde047;
@@ -57,66 +56,8 @@ class HotkeyKeySequenceEdit(QLineEdit):
             """
         )
 
-    def keyPressEvent(self, event: QKeyEvent) -> None:
-        key = event.key()
-        modifiers = event.modifiers()
-
-        # Ignore standalone modifier keys (wait for combination)
-        if key in (
-            Qt.Key.Key_Control,
-            Qt.Key.Key_Shift,
-            Qt.Key.Key_Alt,
-            Qt.Key.Key_Meta,
-        ):
-            super().keyPressEvent(event)
-            return
-
-        # Backspace or Delete clears the hotkey
-        if key in (Qt.Key.Key_Backspace, Qt.Key.Key_Delete):
-            self.setText("")
-            event.accept()
-            return
-
-        # Escape cancels focus
-        if key == Qt.Key.Key_Escape:
-            self.clearFocus()
-            event.accept()
-            return
-
-        seq_parts = []
-        if modifiers & Qt.KeyboardModifier.ControlModifier:
-            seq_parts.append("Ctrl")
-        if modifiers & Qt.KeyboardModifier.AltModifier:
-            seq_parts.append("Alt")
-        if modifiers & Qt.KeyboardModifier.ShiftModifier:
-            seq_parts.append("Shift")
-        if modifiers & Qt.KeyboardModifier.MetaModifier:
-            seq_parts.append("Win")
-
-        # Map key name
-        key_text = ""
-        if Qt.Key.Key_F1 <= key <= Qt.Key.Key_F24:
-            key_text = f"F{key - Qt.Key.Key_F1 + 1}"
-        elif Qt.Key.Key_A <= key <= Qt.Key.Key_Z:
-            key_text = chr(key)
-        elif Qt.Key.Key_0 <= key <= Qt.Key.Key_9:
-            key_text = chr(key)
-        elif key == Qt.Key.Key_Space:
-            key_text = "Space"
-        elif key == Qt.Key.Key_Print:
-            key_text = "PrintScreen"
-        else:
-            txt = event.text().upper().strip()
-            if txt and len(txt) == 1:
-                key_text = txt
-
-        if key_text:
-            seq_parts.append(key_text)
-            self.setText("+".join(seq_parts))
-            self.clearFocus()
-            event.accept()
-        else:
-            super().keyPressEvent(event)
+    def text(self) -> str:
+        return self.keySequence().toString()
 
 
 VIDEO_CONTEXT_EXTENSIONS = (
