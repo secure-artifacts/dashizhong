@@ -751,9 +751,19 @@ class ScreenshotEditor(QWidget):
 
     def _hit_dock(self, pos: QPoint) -> tuple[str, str, str, str] | None:
         for key, icon_id, tip, kind, rect in self._dock_hits:
-            if rect.contains(pos):
+            if kind == "sep":
+                continue
+            if rect.adjusted(-4, -4, 4, 4).contains(pos):
                 return key, icon_id, tip, kind
         return None
+
+    def _pos_on_dock_panel(self, pos: QPoint) -> bool:
+        """Return True if pos is anywhere on the dock panels (even between buttons)."""
+        if not self._dock_panel.isNull() and self._dock_panel.adjusted(-2, -2, 2, 2).contains(pos):
+            return True
+        if not self._sub_dock_panel.isNull() and self._sub_dock_panel.adjusted(-2, -2, 2, 2).contains(pos):
+            return True
+        return False
 
     def _draw_icon(self, p: QPainter, icon_id: str, rect: QRect, fg: QColor) -> None:
         """Vector icon for dock buttons (Flameshot-style recognition)."""
@@ -1373,11 +1383,14 @@ class ScreenshotEditor(QWidget):
             self.update()
             return
 
-        # EDIT PHASE: Check Dock Click First
+        # EDIT PHASE: Check Dock Click First (highest priority)
         hit = self._hit_dock(pos)
         if hit is not None:
             key, _icon, _tip, kind = hit
             self._handle_dock_click(key, kind)
+            return
+        # If clicking anywhere on the dock panel area (between buttons), consume the event
+        if self._pos_on_dock_panel(pos):
             return
 
         # Check 8 Handles or Move Selection
@@ -1678,7 +1691,10 @@ class ScreenshotEditor(QWidget):
                 QMessageBox.information(self, "截图", "请先框选有效区域")
             return
         if act == "copy":
-            copy_image_to_clipboard(img)
+            try:
+                copy_image_to_clipboard(img)
+            except Exception:
+                pass
             if self.cfg.get("auto_save", False):
                 try:
                     path = self._default_save_dir() / f"shot_{time.strftime('%Y%m%d_%H%M%S')}.png"
@@ -1698,7 +1714,10 @@ class ScreenshotEditor(QWidget):
             return
         if act == "accept":
             # auto copy + conditional auto save then exit
-            copy_image_to_clipboard(img)
+            try:
+                copy_image_to_clipboard(img)
+            except Exception:
+                pass
             if self.cfg.get("auto_save", True):
                 try:
                     path = self._default_save_dir() / f"shot_{time.strftime('%Y%m%d_%H%M%S')}.png"
