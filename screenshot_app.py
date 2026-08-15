@@ -10,6 +10,7 @@ Capture uses virtual desktop (multi-monitor). Editing is on a fullscreen overlay
 from __future__ import annotations
 
 import math
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
