@@ -7,5 +7,5 @@ Pillow==12.3.0
 sounddevice==0.5.5
 pywin32==312; platform_system == "Windows"
 python-vlc==3.0.21203
-yt-dlp==2026.7.4
+yt-dlp==2026.8.19
 pytz==2026.3.post1
