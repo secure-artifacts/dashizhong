@@ -149,7 +149,13 @@ def main():
                 # an already selected name after the non-native dialog opens.
                 dialog.findChild(QLineEdit, 'fileNameEdit').setText(output.name)
                 pump()
-                assert Path(dialog.selectedFiles()[0]) == output
+                # Windows TEMP can contain an 8.3 alias (e.g. RUNNER~1).
+                # Qt expands it to the long name. Compare filesystem paths,
+                # not their spelling; keep the raw TEMP input to cover this.
+                assert Path(dialog.selectedFiles()[0]).resolve() == output.resolve(), (
+                    f'selected={dialog.selectedFiles()!r}, expected={str(output)!r}, '
+                    f'directory={dialog.directory().absolutePath()!r}'
+                )
                 rec = board.recorder
                 original_stop = rec.stop
                 calls = []
@@ -163,7 +169,10 @@ def main():
                 before = len(ticks)
                 pump(10, until=lambda: board.recorder is None)
                 assert len(calls) == 1
-                assert Path(calls[0]) == output, board.lbl_status.text()
+                assert Path(calls[0]).resolve() == output.resolve(), (
+                    f'saved={calls[0]!r}, expected={str(output)!r}; '
+                    f'{board.lbl_status.text()}'
+                )
                 assert len(ticks) > before + 3
                 assert output.stat().st_size > 1000
                 video = cv2.VideoCapture(str(output))
