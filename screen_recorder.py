@@ -478,36 +478,39 @@ class AudioRecorder:
         self.write_thread = None
 
     def start(self) -> None:
-        if self.cfg.mic_idx is not None or self.cfg.sys_idx is not None:
+        if self.is_recording:
+            return
+        if self.mic_idx is not None or self.sys_idx is not None:
             try:
                 _ffmpeg_bin()
             except RuntimeError as exc:
-                self._cleanup_temp()
                 raise RuntimeError("录制音频需要应用提供的 FFmpeg") from exc
         self.is_recording = True
         self.is_paused = False
+        try:
+            self._start_streams()
+        except Exception:
+            self.stop()
+            raise
+
+    def _start_streams(self) -> None:
         if self.mic_idx is not None:
             try:
                 def cb(data, frames, t, status):
-                    if not self.is_paused:
+                    if self.is_recording and not self.is_paused:
                         self.q_mic.put(data.copy())
 
                 self.stream_mic = sd.InputStream(
                     device=self.mic_idx, channels=1, samplerate=self.sample_rate, callback=cb
                 )
                 self.stream_mic.start()
-            except Exception as e:
-                try:
-                    import sys as _sys
-                    if _sys.stderr: _sys.stderr.write(f'{str(f"mic failed: {e}")}\n')
-                except Exception: pass
-                self.mic_idx = None
-                self.stream_mic = None
+            except Exception as exc:
+                raise RuntimeError(f"无法打开麦克风，请重新选择设备或选择「不录制」：{exc}") from exc
 
         if self.sys_idx is not None:
             try:
                 def cb(data, frames, t, status):
-                    if not self.is_paused:
+                    if self.is_recording and not self.is_paused:
                         self.q_sys.put(data.copy())
 
                 ch = 2
@@ -520,13 +523,8 @@ class AudioRecorder:
                     device=self.sys_idx, channels=ch, samplerate=self.sample_rate, callback=cb
                 )
                 self.stream_sys.start()
-            except Exception as e:
-                try:
-                    import sys as _sys
-                    if _sys.stderr: _sys.stderr.write(f'{str(f"system audio failed: {e}")}\n')
-                except Exception: pass
-                self.sys_idx = None
-                self.stream_sys = None
+            except Exception as exc:
+                raise RuntimeError(f"无法打开系统声音，请重新选择设备或选择「不录制」：{exc}") from exc
 
         if self.mic_idx is not None or self.sys_idx is not None:
             self.wav_file = wave.open(self.output_wav_path, "wb")
@@ -589,21 +587,29 @@ class AudioRecorder:
 
     def stop(self) -> None:
         self.is_recording = False
-        if self.write_thread:
-            self.write_thread.join(timeout=2.0)
+        self.is_paused = False
+        # Stop producers before draining queued audio and closing the WAV.
         for stream in (self.stream_mic, self.stream_sys):
             if stream is None:
                 continue
             try:
                 stream.stop()
+            except Exception:
+                pass
+            try:
                 stream.close()
             except Exception:
                 pass
+        self.stream_mic = self.stream_sys = None
+        if self.write_thread and self.write_thread.ident is not None:
+            self.write_thread.join(timeout=2.0)
+        self.write_thread = None
         if self.wav_file:
             try:
                 self.wav_file.close()
             except Exception:
                 pass
+            self.wav_file = None
 
 
 # ---------------------------------------------------------------------------
@@ -859,6 +865,14 @@ class ScreenRecorder:
             return False
 
     def _video_loop(self) -> None:
+        try:
+            self._capture_loop()
+        except Exception as exc:
+            self._error = f"屏幕采集失败：{exc}"
+        finally:
+            self.is_recording = False
+
+    def _capture_loop(self) -> None:
         tw, th = self.target_size
         # ensure even dimensions for yuv420p
         tw -= tw % 2
@@ -877,18 +891,24 @@ class ScreenRecorder:
 
         frame_delay = 1.0 / max(1, self.cfg.fps)
         frames = 0
+        last_frame_at = time.monotonic()
         while self.is_recording:
             t0 = time.time()
             self._update_duration()
             if self.is_paused:
+                last_frame_at = time.monotonic()
                 time.sleep(0.05)
                 continue
 
             region = resolve_region(self.cfg.target)
             frame = capture_bgr(region, target=self.cfg.target)
             if frame is None:
+                if time.monotonic() - last_frame_at > 5:
+                    self._error = "连续五秒无法捕获画面，请重新选择有效的屏幕或窗口"
+                    break
                 time.sleep(0.02)
                 continue
+            last_frame_at = time.monotonic()
 
             # Overlay annotations
             if self.cfg.overlay_provider:

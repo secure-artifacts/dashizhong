@@ -13,7 +13,7 @@ class MediaStreamFallbackTests(unittest.TestCase):
         source = SOURCE_PATH.read_text(encoding="utf-8")
         self.assertIn("MAX_COMPAT_CACHE_BYTES = 512 * 1024 * 1024", source)
         self.assertIn("tempfile.mkdtemp(prefix=\"ClockAlarm-media-\")", source)
-        self.assertIn("shutil.rmtree(self._media_cache_dir, ignore_errors=True)", source)
+        self.assertIn("self.stream_worker.retire_cache(self._media_cache_dir)", source)
         self.assertIn("YtDlpStreamWorker", source)
         self.assertIn("prefetch", source)
 

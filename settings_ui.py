@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import time
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QKeySequence, QKeyEvent
 from PyQt6.QtWidgets import (
     QCheckBox,
@@ -18,6 +19,8 @@ from PyQt6.QtWidgets import (
     QKeySequenceEdit,
     QLineEdit,
     QMessageBox,
+    QPlainTextEdit,
+    QProgressBar,
     QPushButton,
     QScrollArea,
     QSpinBox,
@@ -26,7 +29,7 @@ from PyQt6.QtWidgets import (
 )
 
 from autostart import is_autostart_enabled, set_autostart
-from cleaner import CLEAN_SCOPES, DEFAULT_SCOPES
+from cleaner import CLEAN_SCOPES, DEFAULT_SCOPES, CleanProgress, CleanReport
 
 
 RISKY_CLEAN_SCOPES = {"prefetch", "recycle", "wu", "delivery"}
@@ -605,3 +608,111 @@ class CleanerDialog(_StyledDialog):
 
     def selected_scopes(self) -> list[str]:
         return list(self._accepted_scopes)
+
+
+class CleanerProgressDialog(_StyledDialog):
+    """Live cleanup feedback; all widget updates run on the GUI thread."""
+
+    def __init__(self, scopes: list[str], cancel_event, parent=None) -> None:
+        super().__init__("Clock/Alarm — 清理进度", parent)
+        self.resize(640, 500)
+        self.cancel_event = cancel_event
+        self.running = True
+        self._started = time.monotonic()
+        self._completed = 0
+        labels = {key: label for key, label, _ in CLEAN_SCOPES}
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(12)
+        self.status = QLabel("正在准备清理…")
+        self.status.setStyleSheet("font-size:18px; font-weight:700; color:#38bdf8;")
+        layout.addWidget(self.status)
+        scope_label = QLabel("本次项目：" + "、".join(labels[s] for s in scopes if s in labels))
+        scope_label.setWordWrap(True)
+        layout.addWidget(scope_label)
+        self.progress = QProgressBar()
+        self.progress.setRange(0, max(1, len(set(scopes) & set(labels))))
+        self.progress.setValue(0)
+        self.progress.setFormat("项目进度：%v / %m")
+        self.progress.setStyleSheet("QProgressBar { border:1px solid #26445f; border-radius:6px; text-align:center; color:white; min-height:24px; } QProgressBar::chunk { background:#0e7490; }")
+        layout.addWidget(self.progress)
+        self.activity = QProgressBar()
+        self.activity.setRange(0, 0)
+        self.activity.setFixedHeight(6)
+        self.activity.setTextVisible(False)
+        self.activity.setStyleSheet("QProgressBar { border:none; background:#0f172a; } QProgressBar::chunk { background:#38bdf8; }")
+        layout.addWidget(self.activity)
+        self.current_item = QLabel("正在读取所选项目…")
+        self.current_item.setTextFormat(Qt.TextFormat.PlainText)
+        self.current_item.setWordWrap(True)
+        self.current_item.setMinimumHeight(36)
+        layout.addWidget(self.current_item)
+        self.stats = QLabel()
+        self.stats.setStyleSheet("font-size:14px; font-weight:600;")
+        self._set_stats(0, 0, 0)
+        layout.addWidget(self.stats)
+        self.elapsed = QLabel("耗时 00:00")
+        layout.addWidget(self.elapsed)
+        self.details = QPlainTextEdit()
+        self.details.setReadOnly(True)
+        self.details.setStyleSheet("background:#0f172a; color:#cbd5e1; border:1px solid #26445f; border-radius:6px;")
+        self.details.setPlainText("按项目显示进度；文件数量与释放空间会实时更新。\n占用中或无法访问的文件会跳过。")
+        layout.addWidget(self.details, 1)
+        buttons = QHBoxLayout()
+        self.cancel_button = QPushButton("停止清理")
+        self.cancel_button.clicked.connect(self.request_stop)
+        self.close_button = QPushButton("后台运行")
+        self.close_button.setToolTip("隐藏窗口后，可再次点击“电脑清理”查看进度。")
+        self.close_button.clicked.connect(self.hide)
+        buttons.addWidget(self.cancel_button)
+        buttons.addStretch()
+        buttons.addWidget(self.close_button)
+        layout.addLayout(buttons)
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._update_elapsed)
+        self.timer.start(1000)
+
+    def _update_elapsed(self) -> None:
+        seconds = int(time.monotonic() - self._started)
+        self.elapsed.setText(f"耗时 {seconds // 60:02d}:{seconds % 60:02d}")
+
+    def _set_stats(self, files: int, size: int, skipped: int) -> None:
+        self.stats.setText(f"已清理 {files:,} 个文件  ·  释放 {size / 1048576:.1f} MB  ·  跳过/异常 {skipped}")
+
+    def update_progress(self, progress: object) -> None:
+        if not self.running or not isinstance(progress, CleanProgress):
+            return
+        self.progress.setValue(progress.completed_scopes)
+        if not self.cancel_event.is_set():
+            self.status.setText(f"正在清理：{progress.label}")
+            self.current_item.setText(progress.current_item or "正在检查此项目…")
+        self._set_stats(progress.files_removed, progress.bytes_freed, progress.skipped)
+        if progress.completed_scopes > self._completed:
+            self.details.appendPlainText(f"已处理：{progress.label}")
+            self._completed = progress.completed_scopes
+
+    def request_stop(self) -> None:
+        if not self.running:
+            return
+        self.cancel_event.set()
+        self.cancel_button.setEnabled(False)
+        self.status.setText("正在停止…")
+        self.current_item.setText("当前文件或系统操作结束后停止；已经清理的内容不会恢复。")
+
+    def finish(self, report: CleanReport) -> None:
+        self.running = False
+        self.timer.stop()
+        self._update_elapsed()
+        self.activity.hide()
+        self.cancel_button.setEnabled(False)
+        self.close_button.setText("关闭")
+        self.status.setText("清理已停止" if report.cancelled else ("清理结束，有项目失败" if report.failed else "清理完成"))
+        self.current_item.setText(report.summary())
+        self._set_stats(report.files_removed, report.bytes_freed, len(report.errors))
+        if not report.cancelled:
+            self.progress.setValue(self.progress.maximum())
+        if report.errors:
+            self.details.appendPlainText("\n跳过/异常详情（最多显示 50 条）：\n" + "\n".join(report.errors[:50]))
+        elif not report.files_removed:
+            self.details.appendPlainText("\n本次没有找到可以移除的文件。")
+        self.details.appendPlainText("\n" + report.summary())

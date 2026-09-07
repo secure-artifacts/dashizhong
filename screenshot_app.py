@@ -315,6 +315,8 @@ class ScreenshotEditor(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         # Tool windows often miss wheel without focus — track app-level wheels while open
         self._wheel_filter_installed = False
+        self._finished_emitted = False
+        self._save_dialog = None
 
         # phase: "select" = aim crosshair + drag region; "edit" = multi-tool annotation
         # (Flameshot-style: stay in edit until save/exit/cancel — never auto re-select)
@@ -501,6 +503,9 @@ class ScreenshotEditor(QWidget):
 
     def closeEvent(self, e) -> None:  # type: ignore[override]
         self._remove_wheel_filter()
+        if not self._finished_emitted:
+            self._finished_emitted = True
+            self.finished.emit(None)
         super().closeEvent(e)
 
     def hideEvent(self, e) -> None:  # type: ignore[override]
@@ -1652,12 +1657,66 @@ class ScreenshotEditor(QWidget):
         return path
 
     def _finish_ok(self, img: QImage) -> None:
-        self.finished.emit(img)
+        if not self._finished_emitted:
+            self._finished_emitted = True
+            self.finished.emit(img)
         self.close()
+
+    def _auto_save_image(self, img: QImage) -> bool:
+        try:
+            path = self._default_save_dir() / f"shot_{time.strftime('%Y%m%d_%H%M%S')}_{time.time_ns() % 1000000000:09d}.png"
+            if not img.save(str(path), "PNG"):
+                raise OSError("无法写入图片，请检查保存目录和磁盘空间。")
+            return True
+        except Exception as exc:
+            QMessageBox.warning(self, "截图保存失败", str(exc))
+            return False
+
+    def _save_image_as(self, img: QImage) -> None:
+        if self._save_dialog is not None:
+            return
+        try:
+            path = self._default_save_dir() / f"shot_{time.strftime('%Y%m%d_%H%M%S')}.png"
+            dialog = QFileDialog(self, "保存截图", str(path), "PNG 图像 (*.png)")
+            dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+            dialog.setAcceptMode(QFileDialog.AcceptMode.AcceptSave)
+            dialog.setDefaultSuffix("png")
+            self._save_dialog = dialog
+            self._set_action_shortcuts_enabled(False)
+            self.hide()
+
+            def finished(result):
+                files = dialog.selectedFiles()
+                self._save_dialog = None
+                dialog.deleteLater()
+                if self._finished_emitted:
+                    return
+                self.show()
+                self.raise_()
+                self.activateWindow()
+                self._set_action_shortcuts_enabled(True)
+                if result != QFileDialog.DialogCode.Accepted or not files:
+                    return
+                try:
+                    if not img.save(files[0], "PNG"):
+                        raise OSError("无法写入图片，请检查保存目录和磁盘空间。")
+                except Exception as exc:
+                    QMessageBox.warning(self, "截图保存失败", str(exc))
+                    return
+                self._finish_ok(img)
+
+            dialog.finished.connect(finished)
+            dialog.open()
+        except Exception as exc:
+            if self._save_dialog is not None:
+                self._save_dialog.deleteLater()
+                self._save_dialog = None
+            self.show()
+            self._set_action_shortcuts_enabled(True)
+            QMessageBox.warning(self, "截图保存失败", str(exc))
 
     def _on_action(self, act: str) -> None:
         if act == "cancel":
-            self.finished.emit(None)
             self.close()
             return
         if act == "reselect":
@@ -1691,17 +1750,16 @@ class ScreenshotEditor(QWidget):
             if act in ("copy", "save", "pin", "accept"):
                 QMessageBox.information(self, "截图", "请先框选有效区域")
             return
+        if act == "save":
+            self._save_image_as(img)
+            return
         if act == "copy":
             try:
                 copy_image_to_clipboard(img)
             except Exception:
                 pass
-            if self.cfg.get("auto_save", False):
-                try:
-                    path = self._default_save_dir() / f"shot_{time.strftime('%Y%m%d_%H%M%S')}.png"
-                    img.save(str(path))
-                except Exception:
-                    pass
+            if self.cfg.get("auto_save", False) and not self._auto_save_image(img):
+                return
             self._finish_ok(img)
             return
         if act == "pin":
@@ -1719,18 +1777,10 @@ class ScreenshotEditor(QWidget):
                 copy_image_to_clipboard(img)
             except Exception:
                 pass
-            if self.cfg.get("auto_save", True):
-                try:
-                    path = self._default_save_dir() / f"shot_{time.strftime('%Y%m%d_%H%M%S')}.png"
-                    img.save(str(path))
-                except Exception:
-                    pass
+            if self.cfg.get("auto_save", True) and not self._auto_save_image(img):
+                return
             self._finish_ok(img)
             return
-
-    def closeEvent(self, e) -> None:
-        super().closeEvent(e)
-
 
 # Keep pinned windows alive
 _PINNED_REFS: list[PinnedShot] = []
@@ -1749,30 +1799,40 @@ def start_screenshot(
         cfg = state.setdefault("screenshot", {})
 
     if QApplication.instance() is None:
+        if on_done:
+            on_done(None)
         return None
 
     def _run() -> None:
         global _EDITOR_REF
         try:
             background, geometry = capture_virtual_desktop()
+            editor = ScreenshotEditor(background, geometry, cfg=cfg)
         except Exception as exc:
+            if on_done:
+                on_done(None)
             QMessageBox.warning(None, "截图失败", str(exc))
             return
 
-        editor = ScreenshotEditor(background, geometry, cfg=cfg)
         _EDITOR_REF = editor
 
         def _finished(image):
+            global _EDITOR_REF
+            if _EDITOR_REF is editor:
+                _EDITOR_REF = None
+            editor.deleteLater()
             if on_done:
                 on_done(image)
-            for pinned in editor._pinned:
-                _PINNED_REFS.append(pinned)
 
         editor.finished.connect(_finished)
-        editor.show()
-        editor.raise_()
-        editor.activateWindow()
-        editor.setFocus()
+        try:
+            editor.show()
+            editor.raise_()
+            editor.activateWindow()
+            editor.setFocus()
+        except Exception as exc:
+            editor.close()
+            QMessageBox.warning(None, "截图失败", str(exc))
 
     QTimer.singleShot(120, _run)
     return None

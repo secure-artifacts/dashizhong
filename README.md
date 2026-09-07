@@ -1,4 +1,8 @@
 # 时钟闹钟
+
+下载正式版本：[GitHub Releases](https://github.com/secure-artifacts/dashizhong/releases/latest)。
+版本变化与升级说明见 [更新日志](CHANGELOG.md)。
+
 功能：
 
 - 闹钟、世界时钟和倒计时（含闹铃声音）

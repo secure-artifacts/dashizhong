@@ -12,7 +12,7 @@ import win32api
 import win32con
 import win32gui
 from PyQt6.QtCore import Qt, QPoint, QRect, QTimer, pyqtSignal, QObject, QSize
-from PyQt6.QtGui import QPainter, QPen, QColor, QImage, QPixmap, QMouseEvent, QPalette
+from PyQt6.QtGui import QPainter, QPen, QColor, QImage, QPixmap, QMouseEvent, QPalette, QRegion
 from PyQt6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -76,6 +76,7 @@ class RecordingDrawOverlay(QWidget):
         self.overlay_rgba: np.ndarray | None = None
         self.is_draw_mode = False
         self.target_region: dict | None = None
+        self.controls_window: QWidget | None = None
         self._exit_btn = QRect()  # close-draw button on overlay
 
         self.track_timer = QTimer(self)
@@ -111,8 +112,8 @@ class RecordingDrawOverlay(QWidget):
         p.end()
         self.setCursor(QCursor(pm, 8, 42))
 
-    def _force_topmost_clickable(self) -> None:
-        """Windows: topmost + clear WS_EX_TRANSPARENT so clicks hit us."""
+    def _apply_input_mode(self) -> None:
+        """Apply click-through to the native window as well as Qt widgets."""
         try:
             hwnd = int(self.winId())
             GWL_EXSTYLE = -20
@@ -121,19 +122,22 @@ class RecordingDrawOverlay(QWidget):
             WS_EX_NOACTIVATE = 0x08000000
             ex = win32gui.GetWindowLong(hwnd, GWL_EXSTYLE)
             ex |= WS_EX_LAYERED
-            ex &= ~WS_EX_TRANSPARENT
-            ex &= ~WS_EX_NOACTIVATE
+            if self.is_draw_mode:
+                ex &= ~(WS_EX_TRANSPARENT | WS_EX_NOACTIVATE)
+            else:
+                ex |= WS_EX_TRANSPARENT | WS_EX_NOACTIVATE
             win32gui.SetWindowLong(hwnd, GWL_EXSTYLE, ex)
             win32gui.SetWindowPos(
                 hwnd,
-                win32con.HWND_TOPMOST,
+                0,
                 0,
                 0,
                 0,
                 0,
                 win32con.SWP_NOMOVE
                 | win32con.SWP_NOSIZE
-                | win32con.SWP_SHOWWINDOW
+                | win32con.SWP_NOZORDER
+                | win32con.SWP_NOACTIVATE
                 | win32con.SWP_FRAMECHANGED,
             )
         except Exception:
@@ -154,13 +158,14 @@ class RecordingDrawOverlay(QWidget):
             self.raise_()
             self.activateWindow()
             self.setFocus(Qt.FocusReason.OtherFocusReason)
-            self._force_topmost_clickable()
+            self._apply_input_mode()
             self.update()
         else:
             self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
             self.setCursor(Qt.CursorShape.ArrowCursor)
             self.drawing = False
             self.cursor_pos = QPoint(-100, -100)
+            self._apply_input_mode()
             # Keep overlay visible (strokes) but click-through while not drawing
             self.update()
 
@@ -205,8 +210,14 @@ class RecordingDrawOverlay(QWidget):
             if geo.x() != x or geo.y() != y or geo.width() != w or geo.height() != h:
                 self.setGeometry(x, y, w, h)
             self._ensure_canvas()
-            if self.is_draw_mode:
-                self._force_topmost_clickable()
+            # Leave a native hit-test hole for the recording buttons. Never
+            # repeatedly raise the full-screen overlay above other windows.
+            if self.is_draw_mode and self.controls_window and self.controls_window.isVisible():
+                controls_rect = self.controls_window.frameGeometry()
+                controls_rect.translate(-self.geometry().topLeft())
+                self.setMask(QRegion(self.rect()).subtracted(QRegion(controls_rect.adjusted(-4, -4, 4, 4))))
+            else:
+                self.clearMask()
         except Exception:
             pass
 
@@ -337,7 +348,8 @@ class RecordingDrawOverlay(QWidget):
             ptr = img.bits()
             ptr.setsize(img.sizeInBytes())
             raw = np.frombuffer(ptr, np.uint8).reshape((h, bpl))[:, : w * 4].copy()
-            self.overlay_rgba = raw.reshape((h, w, 4))
+            rgba = raw.reshape((h, w, 4))
+            self.overlay_rgba = rgba if np.any(rgba[:, :, 3]) else None
         except Exception:
             try:
                 img = self.canvas_image.convertToFormat(QImage.Format.Format_RGBA8888)
@@ -433,13 +445,16 @@ class RecordingControlBar(QWidget):
             return
         self.lbl.setText("⏸ 已暂停" if paused else "🔴 录制中")
         self.btn_pause.setText("继续" if paused else "暂停")
+        for button in (self.btn_cursor, self.btn_brush, self.btn_clear, self.btn_pause, self.btn_stop):
+            button.setEnabled(True)
+        was_visible = self.isVisible()
         self.show()
         self.raise_()
         # bottom center of primary screen
         from PyQt6.QtGui import QGuiApplication
 
         scr = QGuiApplication.primaryScreen()
-        if scr:
+        if scr and not was_visible:
             g = scr.availableGeometry()
             self.adjustSize()
             self.move(g.center().x() - self.width() // 2, g.bottom() - self.height() - 24)
@@ -463,16 +478,20 @@ class FloatingRecorderBoard(QWidget):
         self._bridge.finished.connect(self._on_save_finished)
         self._cursor_color = QColor(255, 220, 40)
         self._busy_stop = False
+        self._save_dialog: QFileDialog | None = None
+        self._save_thread: threading.Thread | None = None
+        self._closing = False
         self.control_bar = RecordingControlBar(self)
 
         if not embedded:
             self.setWindowFlags(
-                Qt.WindowType.FramelessWindowHint
+                Qt.WindowType.Window
                 | Qt.WindowType.WindowStaysOnTopHint
-                | Qt.WindowType.Tool
             )
-            self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-            self.resize(420, 620)
+            self.setWindowTitle("Clock/Alarm — 屏幕录制")
+            self.setMinimumSize(460, 380)
+            available = self.screen().availableGeometry()
+            self.resize(min(820, available.width()), min(780, available.height() - 60))
         else:
             self.setWindowFlags(Qt.WindowType.Widget)
 
@@ -500,9 +519,9 @@ class FloatingRecorderBoard(QWidget):
                     border: 1px solid rgba(148,163,184,0.22);
                     border-radius: 16px;
                 }
-                QLabel { color: #e2e8f0; font-size: 11px; font-weight: 600; }
+                QLabel { color: #e2e8f0; font-size: 12px; font-weight: 600; }
                 QLabel#title { color: #34d399; font-size: 14px; font-weight: 800; }
-                QLabel#muted { color: #94a3b8; font-size: 10px; font-weight: 500; }
+                QLabel#muted { color: #94a3b8; font-size: 11px; font-weight: 500; }
                 QComboBox, QLineEdit, QSpinBox {
                     background: #0f172a; color: #ffffff;
                     border: 1px solid rgba(148,163,184,0.35); border-radius: 8px;
@@ -559,7 +578,7 @@ class FloatingRecorderBoard(QWidget):
             )
         lay = QVBoxLayout(box)
         lay.setContentsMargins(4 if self.embedded else 14, 4 if self.embedded else 12, 4 if self.embedded else 14, 4 if self.embedded else 12)
-        lay.setSpacing(8)
+        lay.setSpacing(12)
 
         header = QHBoxLayout()
         header.addWidget(QLabel("🎥 屏幕录制设置", objectName="title"), 1)
@@ -573,6 +592,8 @@ class FloatingRecorderBoard(QWidget):
 
         # ── Live preview + controls in a resizable splitter ──────────────
         splitter = QSplitter(Qt.Orientation.Vertical)
+        self.splitter = splitter
+        splitter.setChildrenCollapsible(False)
         splitter.setHandleWidth(6)
         splitter.setStyleSheet(
             "QSplitter::handle { background: #1e293b; border-radius: 3px; }"
@@ -588,7 +609,7 @@ class FloatingRecorderBoard(QWidget):
         self.preview_label.setObjectName("muted")
         self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.preview_label.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Ignored
         )
         self.preview_label.setStyleSheet(
             "QLabel { background: #020617; border: 1px solid #1e293b; border-radius: 12px; color: #64748b; }"
@@ -598,18 +619,22 @@ class FloatingRecorderBoard(QWidget):
 
         # Controls pane (scrollable)
         controls_pane = QScrollArea()
+        self.controls_pane = controls_pane
+        controls_pane.setMinimumHeight(100)
         controls_pane.setWidgetResizable(True)
         controls_pane.setFrameShape(QFrame.Shape.NoFrame)
         controls_pane.setStyleSheet("background: transparent;")
         controls_inner = QWidget()
         controls_layout = QVBoxLayout(controls_inner)
-        controls_layout.setContentsMargins(0, 4, 0, 0)
-        controls_layout.setSpacing(6)
+        controls_layout.setContentsMargins(4, 8, 8, 8)
+        controls_layout.setSpacing(14)
         controls_pane.setWidget(controls_inner)
         splitter.addWidget(controls_pane)
 
-        # Set initial sizes: 280 preview, rest for controls
-        splitter.setSizes([280, 400])
+        # Keep the preview compact; give extra height to the settings.
+        splitter.setSizes([180, 500])
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
         lay.addWidget(splitter, 1)
 
         # Alias for easy reference
@@ -617,7 +642,8 @@ class FloatingRecorderBoard(QWidget):
 
         form = QGridLayout()
         form.setHorizontalSpacing(8)
-        form.setVerticalSpacing(6)
+        form.setVerticalSpacing(12)
+        form.setColumnStretch(1, 1)
         form.addWidget(QLabel("分辨率"), 0, 0)
         self.cmb_res = QComboBox()
         self.cmb_res.addItem("1080p 高清 (推荐)", "1080p")
@@ -636,7 +662,7 @@ class FloatingRecorderBoard(QWidget):
 
         form.addWidget(QLabel("录制目标"), 1, 0)
         self.cmb_target = QComboBox()
-        self.cmb_target.setMinimumWidth(200)
+        self.cmb_target.setMinimumWidth(0)
         self._style_cb(self.cmb_target)
         form.addWidget(self.cmb_target, 1, 1, 1, 2)
         btn_ref_t = QPushButton("刷新", objectName="soft")
@@ -663,7 +689,9 @@ class FloatingRecorderBoard(QWidget):
         self.slider_cursor = QSlider(Qt.Orientation.Horizontal)
         self.slider_cursor.setRange(12, 48)
         self.slider_cursor.setValue(24)
-        self.slider_cursor.setFixedWidth(90)
+        self.slider_cursor.setMinimumWidth(60)
+        self.slider_cursor.valueChanged.connect(self._update_cursor_options)
+        self.chk_cursor.toggled.connect(self._update_cursor_options)
         self.btn_brush = QPushButton("✏️ 画笔标注", objectName="soft")
         self.btn_brush.setCheckable(True)
         self.btn_brush.clicked.connect(self._toggle_brush)
@@ -691,12 +719,15 @@ class FloatingRecorderBoard(QWidget):
             cur_row.addWidget(self.slider_cursor)
             cur_row.addStretch(1)
             ctrl_lay.addLayout(cur_row)
-            brush_row = QHBoxLayout()
-            brush_row.addWidget(self.btn_brush)
-            brush_row.addWidget(self.cmb_brush)
-            brush_row.addWidget(self.slider_brush)
-            brush_row.addWidget(self.btn_clear)
-            brush_row.addStretch(1)
+            brush_row = QGridLayout()
+            brush_row.setHorizontalSpacing(10)
+            brush_row.setVerticalSpacing(8)
+            brush_row.addWidget(self.btn_brush, 0, 0)
+            brush_row.addWidget(self.cmb_brush, 0, 1)
+            brush_row.addWidget(self.btn_clear, 0, 2)
+            brush_row.addWidget(QLabel("画笔粗细"), 1, 0)
+            brush_row.addWidget(self.slider_brush, 1, 1, 1, 2)
+            brush_row.setColumnStretch(1, 1)
             ctrl_lay.addLayout(brush_row)
         else:
             self.btn_cursor_color.hide()
@@ -726,7 +757,8 @@ class FloatingRecorderBoard(QWidget):
 
         self.lbl_status = QLabel("就绪 · 选好目标后点开始")
         self.lbl_status.setStyleSheet("color: #34d399; font-weight: 700;")
-        ctrl_lay.addWidget(self.lbl_status)
+        self.lbl_status.setWordWrap(True)
+        lay.addWidget(self.lbl_status)
 
         ctrl = QHBoxLayout()
         self.btn_rec = QPushButton("● 开始录制")
@@ -737,6 +769,8 @@ class FloatingRecorderBoard(QWidget):
         self.btn_stop = QPushButton("■ 停止并保存", objectName="danger")
         self.btn_stop.setEnabled(False)
         self.btn_stop.clicked.connect(self._stop)
+        for button in (self.btn_rec, self.btn_pause, self.btn_stop):
+            button.setMinimumHeight(38)
         ctrl.addWidget(self.btn_rec)
         if self.embedded:
             # pause/stop live on floating control bar only
@@ -794,20 +828,41 @@ class FloatingRecorderBoard(QWidget):
             self._save_settings()
 
     def _pick_cursor_color(self) -> None:
-        c = QColorDialog.getColor(self._cursor_color, self, "选择鼠标高亮颜色")
+        if self._busy_stop:
+            return
+        drawing = bool(self.overlay and self.overlay.is_draw_mode)
+        if self.overlay:
+            self.overlay.set_draw_mode(False)
+            self.overlay.hide()
+        parent = self.control_bar if self.control_bar.isVisible() else self
+        try:
+            c = QColorDialog.getColor(
+                self._cursor_color, parent, "选择鼠标高亮颜色",
+                QColorDialog.ColorDialogOption.DontUseNativeDialog,
+            )
+        finally:
+            if self.overlay and self.recorder and not self._busy_stop:
+                self.overlay.show()
+                self.overlay.set_draw_mode(drawing)
+                self.control_bar.raise_()
         if c.isValid():
             self._cursor_color = c
             self._update_cursor_btn()
             self._save_settings()
             if self.recorder and hasattr(self.recorder, "cfg") and self.recorder.cfg:
                 self.recorder.cfg.cursor_color_bgr = (c.blue(), c.green(), c.red())
-            if hasattr(self, "bar") and self.bar and hasattr(self.bar, "btn_cursor"):
+            if self.control_bar:
                 c_hex = c.name()
                 r, g, b = c.red(), c.green(), c.blue()
                 text_col = "#000000" if (r * 0.299 + g * 0.587 + b * 0.114) > 128 else "#ffffff"
-                self.bar.btn_cursor.setStyleSheet(
+                self.control_bar.btn_cursor.setStyleSheet(
                     f"QPushButton#soft {{ background-color: {c_hex} !important; color: {text_col} !important; font-weight: 800; border-radius: 6px; }}"
                 )
+
+    def _update_cursor_options(self) -> None:
+        if self.recorder and not self._busy_stop:
+            self.recorder.cfg.highlight_cursor = self.chk_cursor.isChecked()
+            self.recorder.cfg.cursor_radius = int(self.slider_cursor.value())
 
     def _update_cursor_btn(self) -> None:
         c_hex = self._cursor_color.name()
@@ -834,6 +889,8 @@ class FloatingRecorderBoard(QWidget):
         if not cb:
             return
         cb.setMaxVisibleItems(15)
+        cb.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        cb.setMinimumContentsLength(10)
         cb.setItemDelegate(QStyledItemDelegate(cb))
 
         pal = cb.palette()
@@ -903,7 +960,7 @@ class FloatingRecorderBoard(QWidget):
 
     def _idle_preview(self) -> None:
         """Show live preview even when not recording."""
-        if self.recorder and self.recorder.is_recording:
+        if not self.isVisible() or self._busy_stop or (self.recorder and self.recorder.is_recording):
             return
         target = self._current_target()
         region = screen_recorder.resolve_region(target)
@@ -922,7 +979,7 @@ class FloatingRecorderBoard(QWidget):
         self._show_bgr(small)
 
     def _on_preview_frame(self, frame) -> None:
-        if isinstance(frame, np.ndarray):
+        if self.isVisible() and not self._busy_stop and isinstance(frame, np.ndarray):
             self._show_bgr(frame)
 
     def _show_bgr(self, frame_bgr: np.ndarray) -> None:
@@ -963,6 +1020,8 @@ class FloatingRecorderBoard(QWidget):
             pass
 
     def _toggle_brush(self) -> None:
+        if self._busy_stop:
+            return
         if self.btn_brush.isChecked():
             self._ensure_overlay()
             if self.overlay:
@@ -988,6 +1047,10 @@ class FloatingRecorderBoard(QWidget):
             self.lbl_brush_hint.setText("标注用法：点「画笔标注」→ 画面出现淡蓝遮罩 → 按住左键拖动")
             self.lbl_brush_hint.setStyleSheet("")
             self._set_status("画笔关闭：鼠标可正常点击下方窗口")
+        if self.control_bar.isVisible():
+            self.control_bar.raise_()
+            if self.overlay:
+                self.overlay._track_region()
 
     def _change_brush_color(self) -> None:
         if not self.overlay:
@@ -1018,6 +1081,7 @@ class FloatingRecorderBoard(QWidget):
     def _ensure_overlay(self) -> None:
         if self.overlay is None:
             self.overlay = RecordingDrawOverlay()
+            self.overlay.controls_window = self.control_bar
             try:
                 self.overlay.exit_requested.connect(self._on_overlay_exit_draw)
             except Exception:
@@ -1042,12 +1106,21 @@ class FloatingRecorderBoard(QWidget):
                 region = {"left": 0, "top": 0, "width": 1920, "height": 1080}
         self.overlay.set_region(region)
         self.overlay._ensure_canvas()
+        self.overlay.set_draw_mode(self.btn_brush.isChecked())
         if not self.overlay.isVisible():
             self.overlay.show()
         self.overlay.raise_()
 
     def _start(self) -> None:
-        if self.recorder and self.recorder.is_recording:
+        try:
+            self._start_session()
+        except Exception as exc:
+            if self.recorder:
+                self.recorder.discard()
+            self._on_save_finished(f"启动失败：{exc}")
+
+    def _start_session(self) -> None:
+        if self._busy_stop or self._closing or self.recorder is not None:
             return
         self._save_settings()
         target = self._current_target()
@@ -1094,7 +1167,8 @@ class FloatingRecorderBoard(QWidget):
         try:
             self.recorder.start()
         except Exception as e:
-            self._set_status(f"启动失败: {e}")
+            self.recorder.discard()
+            self._on_save_finished(f"启动失败: {e}")
             return
 
         self.btn_rec.setEnabled(False)
@@ -1113,7 +1187,7 @@ class FloatingRecorderBoard(QWidget):
             pass
 
     def _pause_resume(self) -> None:
-        if not self.recorder:
+        if self._busy_stop or not self.recorder or not self.recorder.is_recording:
             return
         if self.recorder.is_paused:
             self.recorder.resume()
@@ -1133,29 +1207,90 @@ class FloatingRecorderBoard(QWidget):
                 pass
 
     def _stop(self) -> None:
-        if not self.recorder or not self.recorder.is_recording or self._busy_stop:
-            return
+        try:
+            self._stop_session()
+        except Exception as exc:
+            self._finalize_session(None, f"保存失败：{exc}")
+
+    def _set_save_busy(self) -> None:
         self._busy_stop = True
         self.duration_timer.stop()
-        self._set_status("正在快速封装（不重编码画面）…")
-        QApplication.processEvents()
+        self.preview_timer.stop()
+        for button in (self.btn_rec, self.btn_pause, self.btn_stop,
+                       self.control_bar.btn_cursor, self.control_bar.btn_brush,
+                       self.control_bar.btn_clear, self.control_bar.btn_pause,
+                       self.control_bar.btn_stop):
+            button.setEnabled(False)
+        if self.overlay:
+            self.overlay.set_draw_mode(False)
+            self.overlay.hide()
+        self.control_bar.hide()
+
+    def _stop_session(self) -> None:
+        if self.recorder is None or self._busy_stop or self._closing:
+            return
+        self._set_save_busy()
+        self.recorder.pause()
+        self._set_status("录制已暂停，请选择保存位置…")
+        if not self.embedded:
+            self.show()
+            self.raise_()
 
         save_dir = self.txt_save_dir.text().strip() or str(Path.home() / "Videos")
-        Path(save_dir).mkdir(parents=True, exist_ok=True)
         default_name = Path(save_dir) / f"录屏_{self._timestamp()}.mp4"
-        path, _ = QFileDialog.getSaveFileName(
-            self, "保存录屏", str(default_name), "MP4 视频 (*.mp4)"
-        )
-        rec = self.recorder
+        # A non-native, asynchronous dialog keeps Qt responsive on Windows,
+        # even when recording was paused from a topmost floating control bar.
+        dialog = QFileDialog(self, "保存录屏")
+        dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+        dialog.setAcceptMode(QFileDialog.AcceptMode.AcceptSave)
+        dialog.setFileMode(QFileDialog.FileMode.AnyFile)
+        dialog.setNameFilter("MP4 视频 (*.mp4)")
+        dialog.setDefaultSuffix("mp4")
+        dialog.setDirectory(save_dir)
+        dialog.selectFile(default_name.name)
+        dialog.setWindowModality(Qt.WindowModality.WindowModal)
+        self._save_dialog = dialog
+        dialog.accepted.connect(lambda: self._save_dialog_finished(dialog, True))
+        dialog.rejected.connect(lambda: self._save_dialog_finished(dialog, False))
+        dialog.open()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _save_dialog_finished(self, dialog: QFileDialog, accepted: bool) -> None:
+        if dialog is not self._save_dialog or self._closing:
+            return
+        selected = dialog.selectedFiles() if accepted else []
+        self._save_dialog = None
+        dialog.deleteLater()
+        self._finalize_session(selected[0] if selected else None)
+
+    def _finalize_session(self, path: str | None, failure_message: str = "") -> None:
+        if self._save_thread is not None:
+            return
+        if self.recorder is None:
+            self._on_save_finished(failure_message)
+            return
+        self._set_save_busy()
+        self._set_status("正在保存，请稍候…" if path else "正在结束录制…")
+        rec, bridge = self.recorder, self._bridge
 
         def worker():
-            if path:
-                msg = rec.stop(path)
-            else:
-                msg = rec.discard()
-            self._bridge.finished.emit(msg)
+            try:
+                if path:
+                    msg = rec.stop(path)
+                else:
+                    msg = rec.discard()
+            except Exception as exc:
+                msg = f"保存失败：{exc}"
+                try:
+                    rec.discard()
+                except Exception:
+                    pass
+            if not self._closing:
+                bridge.finished.emit(failure_message or msg)
 
-        threading.Thread(target=worker, daemon=True).start()
+        self._save_thread = threading.Thread(target=worker, daemon=True, name="RecorderSave")
+        self._save_thread.start()
 
     def _enter_silent_recording_ui(self) -> None:
         """Minimize settings/main window noise while recording (keep floating control bar)."""
@@ -1219,6 +1354,10 @@ class FloatingRecorderBoard(QWidget):
                 pass
 
     def _on_save_finished(self, msg: str) -> None:
+        if self._closing:
+            return
+        self.duration_timer.stop()
+        self._save_thread = None
         self._busy_stop = False
         self.recorder = None
         if self.overlay:
@@ -1241,6 +1380,12 @@ class FloatingRecorderBoard(QWidget):
         self._leave_silent_recording_ui()
 
     def _tick(self) -> None:
+        if self.recorder and not self.recorder.is_recording and not self._busy_stop:
+            error = self.recorder._error or "录制已意外停止，请检查录制目标和音视频设备"
+            self.duration_timer.stop()
+            self.recorder.discard()
+            self._on_save_finished(error)
+            return
         if self.recorder and self.recorder.is_recording:
             self.recorder._update_duration()
             t = self._fmt(self.recorder.duration_seconds)
@@ -1283,8 +1428,8 @@ class FloatingRecorderBoard(QWidget):
         super().hideEvent(event)
 
     def closeEvent(self, event) -> None:
-        if self.recorder and self.recorder.is_recording:
-            self._set_status("请先停止录制再关闭")
+        if self._busy_stop or (self.recorder and self.recorder.is_recording):
+            self._set_status("正在保存，请稍候…" if self._busy_stop else "请先停止录制再关闭")
             event.ignore()
             return
         if self.overlay:
@@ -1295,8 +1440,16 @@ class FloatingRecorderBoard(QWidget):
 
     def shutdown_for_exit(self) -> None:
         """Synchronously end any active session before the application exits."""
+        self._closing = True
         self.duration_timer.stop()
         self.preview_timer.stop()
+        if self._save_dialog:
+            self._save_dialog.reject()
+            self._save_dialog = None
+        if self._save_thread and self._save_thread.is_alive():
+            # Explicit application exit must finish an accepted save before
+            # Python shuts down its threads and Qt objects.
+            self._save_thread.join()
         recorder = self.recorder
         if recorder is not None:
             recorder.discard()

@@ -16,6 +16,7 @@ jobs:
       contents: read
     outputs:
       version: ${{ steps.version.outputs.version }}
+      release_notes: ${{ steps.notes.outputs.body }}
     steps:
       - name: Checkout exact tagged commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -51,9 +52,29 @@ jobs:
           python -m pip install --disable-pip-version-check
           --only-binary=:all: --requirement requirements-build.txt
 
+      - name: Read versioned release notes
+        id: notes
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: python -B scripts/release_notes.py --version "$env:RELEASE_VERSION" --github-output "$env:GITHUB_OUTPUT"
+
       - name: Run focused tests
         shell: pwsh
         run: python -B -m unittest discover -s tests -v
+
+      - name: Run offline GUI regression tests
+        shell: pwsh
+        timeout-minutes: 10
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python -B tests/application_gui_smoke.py
+          if ($LASTEXITCODE -ne 0) { throw "Application GUI regression failed" }
+          python -B tests/screenshot_cleaner_gui_smoke.py
+          if ($LASTEXITCODE -ne 0) { throw "Screenshot/cleaner GUI regression failed" }
+          python -B tests/recorder_gui_smoke.py
+          if ($LASTEXITCODE -ne 0) { throw "Recorder GUI regression failed" }
 
       - name: Build with PyInstaller
         shell: pwsh
@@ -136,4 +157,5 @@ jobs:
           files: release-assets/*
           fail_on_unmatched_files: true
           generate_release_notes: true
+          body: ${{ needs.build.outputs.release_notes }}
           name: Clock/Alarm ${{ needs.build.outputs.version }}

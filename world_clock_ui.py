@@ -402,7 +402,31 @@ class FloatingWorldClock(QWidget):
         self.details_panel.hide()
         self._expanded_index = -1
         self._collapsed_height = self.height()
-        self.bg_layout.addWidget(self.details_panel, stretch=1)
+        # Reuse the existing controls and timer state in a separate window.
+        self.tools_window = QFrame(self, Qt.WindowType.Window)
+        self.tools_window.setObjectName("bg_widget")
+        self.tools_window.setWindowTitle("Clock/Alarm — 闹钟 / 世界时钟 / 倒计时")
+        self.tools_window.resize(680, 520)
+        self.tools_window.setMinimumSize(480, 360)
+        self.tools_window.setStyleSheet(self.bg_widget.styleSheet() + """
+            QPushButton:checked {
+                background-color: #075985;
+                color: #ffffff;
+                border: 1px solid #38bdf8;
+            }
+        """)
+        tools_layout = QVBoxLayout(self.tools_window)
+        tabs = QHBoxLayout()
+        self.tools_buttons = []
+        for index, title in enumerate(("世界时钟", "闹钟", "倒计时")):
+            button = QPushButton(title)
+            button.setCheckable(True)
+            button.clicked.connect(lambda checked=False, i=index: self.show_tools(i))
+            tabs.addWidget(button)
+            self.tools_buttons.append(button)
+        tools_layout.addLayout(tabs)
+        tools_layout.addWidget(self.details_panel)
+        self.details_panel.show()
         
         self.main_layout.addWidget(self.bg_widget, stretch=1)
         self.resize_grip = QSizeGrip(self)
@@ -552,8 +576,7 @@ class FloatingWorldClock(QWidget):
         """)
 
         def toggle_clock_details():
-            visible = self.feature_menu.isHidden()
-            self.feature_menu.setVisible(visible)
+            self.show_tools(1)
 
         actions = [
             ("⏰  闹钟 / 世界时钟 / 倒计时", toggle_clock_details),
@@ -631,34 +654,17 @@ class FloatingWorldClock(QWidget):
             self.local_seconds.setFont(seconds_font)
 
     def _toggle_details(self, index: int) -> None:
-        """Show one secondary feature at a time; clicking it again folds it."""
-        if self._expanded_index == index and not self.details_panel.isHidden():
-            self.details_panel.hide()
-            self._expanded_index = -1
-            for btn in self.section_buttons:
-                btn.setChecked(False)
-            self.feature_menu.hide()
-            self.feature_toggle_btn.setText("\u25BC")
-            self.resize(self.width(), max(self.minimumHeight(), self._collapsed_height))
-            QTimer.singleShot(0, self._fit_time_font)
-            return
+        self.show_tools(index)
 
-        if self.details_panel.isHidden():
-            self._collapsed_height = self.height()
+    def show_tools(self, index: int = 1) -> None:
         self._expanded_index = index
         self.detail_stack.setCurrentIndex(index)
-        self.details_panel.show()
-        self.feature_menu.hide()
-        self.feature_toggle_btn.setText("\u25BC")
-        for i, btn in enumerate(self.section_buttons):
-            btn.setChecked(i == index)
-        if self.height() < 610:
-            self.resize(self.width(), 610)
-        QTimer.singleShot(0, self._fit_time_font)
-        if index == 1:
-            # Existing alarms need the same adaptive space as alarms added in
-            # the current session. Delay until the stacked page is laid out.
-            QTimer.singleShot(0, self._grow_for_alarm_count)
+        for i, button in enumerate(self.tools_buttons):
+            button.setChecked(i == index)
+        self.tools_window.showNormal()
+        self.tools_window.raise_()
+        self.tools_window.activateWindow()
+
 
     def _build_clock_tab(self):
         w = QWidget()
@@ -1012,6 +1018,8 @@ class FloatingWorldClock(QWidget):
         list_height = min(334, max(160, count * 62 + 16))
         self.list_alarms.setMinimumHeight(list_height)
         self.list_alarms.setMaximumHeight(360)
+        if hasattr(self, "tools_window"):
+            return
         if not self.isVisible() or self._expanded_index != 1:
             return
         screen = self.screen()
@@ -1030,10 +1038,7 @@ class FloatingWorldClock(QWidget):
         
         self.btn_timer_start.setEnabled(not active)
         self.btn_timer_pause.setEnabled(active or bool(t_cfg.get("paused")))
-        if active:
-            self.btn_timer_pause.setText("⏸ 继续" if t_cfg.get("paused") else "⏸ 暂停")
-        else:
-            self.btn_timer_pause.setText("⏸ 暂停")
+        self.btn_timer_pause.setText("▶ 继续" if t_cfg.get("paused") else "⏸ 暂停")
 
     def _start_timer(self):
         t_cfg = self.state_dict.setdefault("timer", {})

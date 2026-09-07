@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import hashlib
 import random
 import shutil
 import tempfile
@@ -342,9 +343,80 @@ class YtDlpStreamWorker(QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._cancel_event = threading.Event()
+        self._prefetch_cancel = threading.Event()
+        self._download_lock = threading.Lock()
+        self._prefetch_lock = threading.Lock()
+        self._completed = {}
 
     def cancel(self):
         self._cancel_event.set()
+        self._prefetch_cancel.set()
+
+    def _download(self, url, target_height, cache_dir, cancel_event):
+        # Serialize all writers, including a foreground request for a prefetch.
+        # A cancelled writer must release its files before another can resume.
+        while not self._download_lock.acquire(timeout=0.1):
+            if cancel_event.is_set():
+                return None
+        try:
+            if cancel_event.is_set():
+                return None
+            root = Path(cache_dir)
+            stem = "media-" + hashlib.sha256(f"{url}\0{target_height}".encode()).hexdigest()
+            key = (str(root), stem)
+            cached = self._completed.get(key)
+            if cached and cached.is_file() and cached.stat().st_size > 0:
+                return str(cached)
+            root.mkdir(parents=True, exist_ok=True)
+
+            def progress(_status):
+                if cancel_event.is_set():
+                    raise yt_dlp.utils.DownloadCancelled()
+
+            limit = target_height if target_height > 0 else 1080
+            ydl_opts = {
+                'extractor_args': {'youtube': {'player_client': ['android', 'web']}},
+                'format': f'bestvideo[height<={limit}]+bestaudio/best[height<={limit}]/best',
+                'quiet': True, 'no_warnings': True, 'noprogress': True,
+                'socket_timeout': 15, 'noplaylist': True,
+                'max_filesize': MAX_COMPAT_CACHE_BYTES,
+                'outtmpl': str(root / f'{stem}.%(ext)s'),
+                'nopart': False, 'progress_hooks': [progress],
+            }
+            try:
+                import imageio_ffmpeg
+                ydl_opts['ffmpeg_location'] = imageio_ffmpeg.get_ffmpeg_exe()
+            except ImportError:
+                pass
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.extract_info(url, download=True)
+            if cancel_event.is_set():
+                return None
+            # Never promote .part, metadata or unmerged .fNNN tracks to playback.
+            formats = {'.mp4', '.mkv', '.webm', '.mov', '.avi', '.m4a', '.mp3', '.ogg', '.opus', '.wav', '.flac'}
+            files = [p for p in root.glob(f'{stem}.*')
+                     if p.stem == stem and p.suffix.lower() in formats
+                     and p.is_file() and p.stat().st_size > 0]
+            if not files:
+                raise RuntimeError("下载未生成完整的播放文件，请重试。")
+            playable = max(files, key=lambda p: p.stat().st_mtime_ns)
+            self._completed[key] = playable
+            return str(playable)
+        finally:
+            self._download_lock.release()
+
+    def retire_cache(self, cache_dir):
+        """Retire only this window's private cache, after writers release files."""
+        self.cancel()
+        def cleanup():
+            with self._download_lock:
+                shutil.rmtree(cache_dir, ignore_errors=True)
+                for key in list(self._completed):
+                    if key[0] == str(Path(cache_dir)):
+                        del self._completed[key]
+        thread = threading.Thread(target=cleanup, daemon=True, name="MediaCacheCleanup")
+        thread.start()
+        return thread
 
     def load_media(self, req_id: int, url: str, target_height: int, cache_dir: str):
         self.cancel()
@@ -353,103 +425,33 @@ class YtDlpStreamWorker(QObject):
 
         def _run():
             try:
-                self.media_status.emit(req_id, "正在极速缓冲...")
-                Path(cache_dir).mkdir(parents=True, exist_ok=True)
-                output_stem = f"media-{req_id}-q{target_height}"
-                output_template = str(Path(cache_dir) / f"{output_stem}.%(ext)s")
-
-                # Check if cached
-                cached_files = [
-                    p for p in Path(cache_dir).glob(f"{output_stem}.*")
-                    if p.is_file() and p.suffix.lower() not in {'.part', '.ytdl', '.json'}
-                ]
-                if cached_files:
-                    playable = max(cached_files, key=lambda p: p.stat().st_mtime_ns)
-                    self.media_ready.emit(req_id, str(playable), target_height)
-                    return
-
-                def _progress_hook(_status):
-                    if cancel_event.is_set():
-                        raise yt_dlp.utils.DownloadCancelled()
-
-                if target_height > 0:
-                    fmt_spec = f'bestvideo[height<={target_height}]+bestaudio/best[height<={target_height}]/best'
-                else:
-                    fmt_spec = 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best'
-
-                ydl_opts = {
-                    'extractor_args': {'youtube': {'player_client': ['android', 'web']}},
-                    'format': fmt_spec,
-                    'quiet': True,
-                    'no_warnings': True,
-                    'socket_timeout': 15,
-                    'noplaylist': True,
-                    'max_filesize': MAX_COMPAT_CACHE_BYTES,
-                    'outtmpl': output_template,
-                    'nopart': False,
-                    'progress_hooks': [_progress_hook],
-                }
-                try:
-                    import imageio_ffmpeg
-                    ydl_opts['ffmpeg_location'] = imageio_ffmpeg.get_ffmpeg_exe()
-                except Exception:
-                    pass
-
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    ydl.extract_info(url, download=True)
-
-                if cancel_event.is_set():
-                    return
-
-                files = [
-                    path for path in Path(cache_dir).glob(f"{output_stem}.*")
-                    if path.is_file() and path.suffix.lower() not in {'.part', '.ytdl', '.json'}
-                ]
-                if not files:
-                    raise RuntimeError("无法生成播放文件。")
-                playable = max(files, key=lambda path: path.stat().st_mtime_ns)
-                self.media_ready.emit(req_id, str(playable), target_height)
+                self.media_status.emit(req_id, "正在缓冲视频…")
+                playable = self._download(url, target_height, cache_dir, cancel_event)
+                if playable and not cancel_event.is_set():
+                    self.media_ready.emit(req_id, playable, target_height)
             except Exception as e:
                 if not cancel_event.is_set():
                     self.error.emit(req_id, str(e))
-        threading.Thread(target=_run, daemon=True).start()
+        thread = threading.Thread(target=_run, daemon=True, name="MediaDownload")
+        thread.start()
+        return thread
 
     def prefetch(self, url: str, target_height: int, cache_dir: str):
+        # LoadedMedia and BufferedMedia may arrive back-to-back.
+        if not self._prefetch_lock.acquire(blocking=False):
+            return None
+        cancel_event = threading.Event()
+        self._prefetch_cancel = cancel_event
         def _run():
             try:
-                Path(cache_dir).mkdir(parents=True, exist_ok=True)
-                output_stem = f"prefetch-{abs(hash(url))}-q{target_height}"
-                output_template = str(Path(cache_dir) / f"{output_stem}.%(ext)s")
-
-                if any(Path(cache_dir).glob(f"{output_stem}.*")):
-                    return
-
-                if target_height > 0:
-                    fmt_spec = f'bestvideo[height<={target_height}]+bestaudio/best[height<={target_height}]/best'
-                else:
-                    fmt_spec = 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best'
-
-                ydl_opts = {
-                    'extractor_args': {'youtube': {'player_client': ['android', 'web']}},
-                    'format': fmt_spec,
-                    'quiet': True,
-                    'no_warnings': True,
-                    'socket_timeout': 15,
-                    'noplaylist': True,
-                    'max_filesize': MAX_COMPAT_CACHE_BYTES,
-                    'outtmpl': output_template,
-                }
-                try:
-                    import imageio_ffmpeg
-                    ydl_opts['ffmpeg_location'] = imageio_ffmpeg.get_ffmpeg_exe()
-                except Exception:
-                    pass
-
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    ydl.extract_info(url, download=True)
+                self._download(url, target_height, cache_dir, cancel_event)
             except Exception:
                 pass
-        threading.Thread(target=_run, daemon=True).start()
+            finally:
+                self._prefetch_lock.release()
+        thread = threading.Thread(target=_run, daemon=True, name="MediaPrefetch")
+        thread.start()
+        return thread
 
 
 # ─── Media Player Window ──────────────────────────────────────────────────
@@ -900,8 +902,12 @@ class MediaPlayerWindow(QWidget):
         return self.player is not None
 
     def _on_media_status_changed(self, status) -> None:
+        if self._is_changing_media or not self._media_cache_dir:
+            return
         if status == QMediaPlayer.MediaStatus.EndOfMedia:
-            QTimer.singleShot(0, self.play_next)
+            request = self._current_request_id
+            QTimer.singleShot(0, lambda: self.play_next()
+                              if request == self._current_request_id else None)
         elif status in {
             QMediaPlayer.MediaStatus.LoadedMedia,
             QMediaPlayer.MediaStatus.BufferedMedia,
@@ -1069,6 +1075,9 @@ class MediaPlayerWindow(QWidget):
         self.play_btn.setIcon(self._play_icon)
 
     def stop(self):
+        self._current_request_id += 1
+        self.stream_worker.cancel()
+        self._media_retry_pending = False
         if self._vlc_ready and self.player:
             try:
                 self.player.stop()
@@ -1282,6 +1291,8 @@ class MediaPlayerWindow(QWidget):
         self.single_loop_btn.setChecked(mode == "single_loop")
         self.random_play_btn.setChecked(mode == "random")
         self.state.setdefault("media", {})["play_mode"] = mode
+        if hasattr(self, "_playlist_save_timer"):
+            self._persist_playlist()
 
     def play_index(self, index: int):
         if index < 0 or index >= len(self.playlist):
@@ -1358,7 +1369,8 @@ class MediaPlayerWindow(QWidget):
             self.audio_output.setVolume(self.vol_slider.value() / 100.0)
             self.player.play()
             if seek_pos_ms > 0:
-                QTimer.singleShot(300, lambda p=seek_pos_ms: self.player.setPosition(p))
+                QTimer.singleShot(300, lambda p=seek_pos_ms, r=req_id:
+                                  self.player.setPosition(p) if r == self._current_request_id else None)
             self.is_playing_state = True
             self.play_btn.setIcon(self._pause_icon)
             self.setWindowTitle(f"Clock/Alarm - {title}")
@@ -1412,12 +1424,21 @@ class MediaPlayerWindow(QWidget):
                 pass
 
     def closeEvent(self, event):
+        self._current_request_id += 1
         self.stream_worker.cancel()
         if self._vlc_ready and self.player:
             try:
                 self.player.stop()
+                self.player.setSource(QUrl())
             except Exception:
                 pass
         self._persist_playlist(immediate=True)
-        shutil.rmtree(self._media_cache_dir, ignore_errors=True)
+        if self._media_cache_dir:
+            self.stream_worker.retire_cache(self._media_cache_dir)
+            self._media_cache_dir = ""
         event.accept()
+
+    def showEvent(self, event):
+        if not self._media_cache_dir:
+            self._media_cache_dir = tempfile.mkdtemp(prefix="ClockAlarm-media-")
+        super().showEvent(event)

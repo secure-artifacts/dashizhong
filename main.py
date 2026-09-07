@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 import traceback
 from datetime import datetime
 from pathlib import Path
@@ -10,7 +11,7 @@ from types import SimpleNamespace
 
 from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 from PyQt6.QtGui import QAction, QIcon
-from PyQt6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon
+from PyQt6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon, QWidget
 
 from cleaner import CleanReport, run_deep_clean_async
 from hotkeys import ClockAlarmHotkeys
@@ -67,6 +68,7 @@ def _get_video_from_argv() -> str | None:
 
 class ClockAlarmApp(QObject):
     clean_finished = pyqtSignal(object)
+    clean_progress = pyqtSignal(object)
 
     def __init__(self, app: QApplication) -> None:
         super().__init__(app)
@@ -85,6 +87,8 @@ class ClockAlarmApp(QObject):
                     error=str(exc),
                 )
         self._cleaning = False
+        self.cleaner_progress_window = None
+        self._screenshot_active = False
         self.recorder_board = None
         self.world_clock_board = None
         self.media_player_board = None
@@ -110,6 +114,7 @@ class ClockAlarmApp(QObject):
         self._apply_saved_autostart()
 
         self.clean_finished.connect(self._on_clean_finished)
+        self.clean_progress.connect(self._on_clean_progress)
         self.app.aboutToQuit.connect(self._shutdown_recorder)
         self.alarm_timer = QTimer(self)
         self.alarm_timer.timeout.connect(self._alarm_tick)
@@ -135,7 +140,7 @@ class ClockAlarmApp(QObject):
         tray = QSystemTrayIcon(icon, self.app)
         menu = QMenu()
         for text, callback in (
-            ("闹钟 / 世界时钟 / 倒计时", self.show_world_clock),
+            ("闹钟 / 世界时钟 / 倒计时", self.show_clock_tools),
             ("区域截图", self.start_screenshot_region),
             ("屏幕录像", self.show_recorder_board),
             ("待办事项", self.show_todos),
@@ -170,27 +175,54 @@ class ClockAlarmApp(QObject):
         """Compatibility entry point for the global hotkey; opens the clock shell."""
         self.show_world_clock()
 
+    def _screenshot_windows(self) -> list[QWidget]:
+        # Todo/notes controllers own multiple windows; they are not QWidgets.
+        candidates = [self.world_clock_board, self.recorder_board,
+                      self.media_player_board, self.cleaner_progress_window]
+        for controller in (self.todo_board, self.notes_ctl):
+            if controller is not None:
+                candidates.extend(getattr(controller, "windows", {}).values())
+                candidates.append(getattr(controller, "manager_win", None))
+        if self.world_clock_board is not None:
+            candidates.append(getattr(self.world_clock_board, "tools_window", None))
+        windows = []
+        for window in candidates:
+            if isinstance(window, QWidget) and window not in windows:
+                windows.append(window)
+        return windows
+
     def start_screenshot_region(self) -> None:
-        from screenshot_app import start_screenshot
-        from PyQt6.QtCore import QTimer
-
-        # Temporarily hide desktop floating widgets so screenshot captures a clean desktop
+        if self._screenshot_active:
+            return
+        self._screenshot_active = True
         hidden_windows = []
-        for board in (self.world_clock_board, self.recorder_board, self.todo_board, self.media_player_board):
-            if board is not None and board.isVisible():
-                board.hide()
-                hidden_windows.append(board)
 
-        def _on_screenshot_done(_image) -> None:
-            # Restore hidden floating windows after screenshot completes or is cancelled
+        def restore_windows(_image=None) -> None:
+            self._screenshot_active = False
             for board in hidden_windows:
                 try:
                     board.show()
-                except Exception:
+                except RuntimeError:
                     pass
+            hidden_windows.clear()
 
-        # Delay screenshot capture to ensure floating windows have fully disappeared from screen
-        QTimer.singleShot(200, lambda: start_screenshot(state=self.store.state, on_done=_on_screenshot_done))
+        def launch() -> None:
+            try:
+                from screenshot_app import start_screenshot
+                start_screenshot(state=self.store.state, on_done=restore_windows)
+            except Exception as exc:
+                restore_windows()
+                QMessageBox.warning(None, "截图失败", str(exc))
+
+        try:
+            for window in self._screenshot_windows():
+                if window.isVisible():
+                    hidden_windows.append(window)
+                    window.hide()
+            QTimer.singleShot(200, launch)
+        except Exception as exc:
+            restore_windows()
+            QMessageBox.warning(None, "截图失败", str(exc))
 
     def rebind_screenshot_hotkeys(self) -> str:
         result = self.hotkeys.rebind()
@@ -225,6 +257,11 @@ class ClockAlarmApp(QObject):
         self.world_clock_board.show()
         self.world_clock_board.raise_()
         self.world_clock_board.activateWindow()
+
+    def show_clock_tools(self) -> None:
+        if self.world_clock_board is None:
+            self.show_world_clock()
+        self.world_clock_board.show_tools(1)
 
     def show_media_player2(self) -> None:
         from media_player_ui import MediaPlayerWindow
@@ -269,9 +306,10 @@ class ClockAlarmApp(QObject):
 
     def start_deep_clean(self, scopes: list[str] | None = None) -> None:
         if self._cleaning:
-            self.tray.showMessage(
-                "清理", "正在清理中，请稍候。", QSystemTrayIcon.MessageIcon.Warning, 3000
-            )
+            if self.cleaner_progress_window:
+                self.cleaner_progress_window.showNormal()
+                self.cleaner_progress_window.raise_()
+                self.cleaner_progress_window.activateWindow()
             return
         if scopes is None:
             from PyQt6.QtWidgets import QDialog
@@ -286,22 +324,43 @@ class ClockAlarmApp(QObject):
         if not selected_scopes:
             QMessageBox.information(None, "电脑清理", "没有选择任何清理项目。")
             return
+        try:
+            from settings_ui import CleanerProgressDialog
+            progress_window = CleanerProgressDialog(selected_scopes, threading.Event())
+            if self.cleaner_progress_window:
+                self.cleaner_progress_window.close()
+                self.cleaner_progress_window.deleteLater()
+            self.cleaner_progress_window = progress_window
+            progress_window.show()
+            progress_window.raise_()
+        except Exception as exc:
+            QMessageBox.warning(None, "无法打开清理进度", str(exc))
+            return
         self._cleaning = True
-        self.tray.showMessage(
-            "清理", "开始清理电脑。", QSystemTrayIcon.MessageIcon.Information, 3000
-        )
 
         def done(report: CleanReport) -> None:
             self.clean_finished.emit(report)
 
-        run_deep_clean_async(done, scopes=selected_scopes)
+        try:
+            run_deep_clean_async(done, scopes=selected_scopes,
+                                 on_progress=self.clean_progress.emit,
+                                 cancel_event=progress_window.cancel_event)
+        except Exception as exc:
+            self._on_clean_finished(CleanReport(failed=True, errors=[str(exc)]))
+
+    def _on_clean_progress(self, progress: object) -> None:
+        if self.cleaner_progress_window and self._cleaning:
+            self.cleaner_progress_window.update_progress(progress)
 
     def _on_clean_finished(self, report: object) -> None:
         self._cleaning = False
         if isinstance(report, CleanReport):
+            if self.cleaner_progress_window:
+                self.cleaner_progress_window.finish(report)
             summary = report.summary()
             self.tray.showMessage(
-                "清理完成", summary, QSystemTrayIcon.MessageIcon.Information, 6000
+                "清理已停止" if report.cancelled else "清理结果", summary,
+                QSystemTrayIcon.MessageIcon.Information, 6000
             )
             self.store.append_log("clean_done", summary)
 
@@ -374,7 +433,7 @@ class ClockAlarmApp(QObject):
                     play_ringtone(str(timer_cfg.get("ringtone") or "beep"))
                 except Exception:
                     pass
-                name = timer_cfg.get("name") or "时间到"
+                name = timer_cfg.get("label") or timer_cfg.get("name") or "时间到"
                 self.tray.showMessage(
                     "倒计时", name, QSystemTrayIcon.MessageIcon.Information, 6000
                 )

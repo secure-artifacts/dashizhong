@@ -6,6 +6,7 @@ import os
 import shutil
 import stat
 import threading
+import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,6 +20,9 @@ class CleanReport:
     folders_touched: int = 0
     notes: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    cancelled: bool = False
+    failed: bool = False
+    _context: _CleanContext | None = field(default=None, repr=False, compare=False)
 
     @property
     def megabytes(self) -> float:
@@ -30,12 +34,64 @@ class CleanReport:
             size_text = f"{mb / 1024:.2f} GB"
         else:
             size_text = f"{mb:.1f} MB"
+        status = "已停止清理" if self.cancelled else ("清理结束（部分项目失败）" if self.failed else "清理完成")
         return (
-            f"清理完成！释放约 {size_text}，"
+            f"{status}，释放约 {size_text}，"
             f"处理 {self.files_removed} 个文件"
             + (f"（{len(self.notes)} 项）" if self.notes else "")
             + "。"
         )
+
+
+@dataclass(frozen=True)
+class CleanProgress:
+    scope: str
+    label: str
+    completed_scopes: int
+    total_scopes: int
+    current_item: str
+    files_removed: int
+    bytes_freed: int
+    skipped: int
+
+
+class _CleanContext:
+    def __init__(self, callback, cancel_event, total):
+        self.callback = callback
+        self.cancel_event = cancel_event
+        self.total = total
+        self.completed = 0
+        self.scope = ""
+        self.label = "正在准备"
+        self.item = ""
+        self.last_update = 0.0
+
+    def notify(self, report: CleanReport, *, item=None, force=False) -> None:
+        if item is not None:
+            self.item = str(item)
+        now = time.monotonic()
+        if self.callback is None or (not force and now - self.last_update < 0.1):
+            return
+        self.last_update = now
+        progress = CleanProgress(self.scope, self.label, self.completed, self.total,
+                                 self.item, report.files_removed, report.bytes_freed, len(report.errors))
+        try:
+            self.callback(progress)
+        except Exception:
+            # A closed observer must not interrupt the cleanup worker.
+            pass
+
+
+def _cancel_requested(report: CleanReport) -> bool:
+    context = report._context
+    if context and context.cancel_event and context.cancel_event.is_set():
+        report.cancelled = True
+    return report.cancelled
+
+
+def _notify_progress(report: CleanReport, *, item=None, force=False) -> None:
+    if report._context:
+        report._context.notify(report, item=item, force=force)
 
 
 _FILE_ATTRIBUTE_REPARSE_POINT = getattr(
@@ -152,6 +208,11 @@ def _validated_cleanup_root(
 
 
 def _remove_path(path: Path, report: CleanReport, root: Path) -> None:
+    if _cancel_requested(report):
+        return
+    _notify_progress(report, item=path.name)
+    if _cancel_requested(report):
+        return
     try:
         os.lstat(path)
     except OSError:
@@ -172,7 +233,11 @@ def _remove_path(path: Path, report: CleanReport, root: Path) -> None:
             return
         if path.is_dir():
             for child in path.iterdir():
+                if _cancel_requested(report):
+                    return
                 _remove_path(child, report, root)
+            if _cancel_requested(report):
+                return
             try:
                 path.rmdir()
             except OSError:
@@ -180,15 +245,22 @@ def _remove_path(path: Path, report: CleanReport, root: Path) -> None:
             report.folders_touched += 1
     except OSError as exc:
         report.errors.append(f"{path.name}: {exc}")
+    finally:
+        _notify_progress(report)
 
 
 def _clear_directory_contents(directory: Path, report: CleanReport, label: str) -> None:
+    if _cancel_requested(report):
+        return
+    _notify_progress(report, item=label, force=True)
     root = _validated_cleanup_root(directory, report, label)
     if root is None:
         return
     before = report.bytes_freed
     try:
         for child in root.iterdir():
+            if _cancel_requested(report):
+                break
             # Skip locked system-critical names defensively.
             name = child.name.lower()
             if name in {"desktop.ini", "thumbs.db"} and "temp" not in str(root).lower():
@@ -290,6 +362,8 @@ DEFAULT_SCOPES: list[str] = ["temp", "thumbs"]
 
 def _clean_browser(report: CleanReport) -> None:
     for label, path in _browser_cache_roots():
+        if _cancel_requested(report):
+            break
         if "Profiles" in str(path) and path.name == "Profiles":
             continue
         _clear_directory_contents(path, report, label)
@@ -297,6 +371,8 @@ def _clean_browser(report: CleanReport) -> None:
 
 def _clean_temp(report: CleanReport) -> None:
     for label, path in _temp_roots():
+        if _cancel_requested(report):
+            break
         if path.name.lower() == "prefetch":
             continue
         _clear_directory_contents(path, report, label)
@@ -312,6 +388,8 @@ def _clean_prefetch(report: CleanReport) -> None:
     before = report.bytes_freed
     try:
         for child in root.glob("*.pf"):
+            if _cancel_requested(report):
+                break
             _remove_path(child, report, root)
     except OSError as exc:
         report.errors.append(f"预读取缓存: {exc}")
@@ -327,33 +405,51 @@ def _clean_thumbs(report: CleanReport) -> None:
         return
     before = report.bytes_freed
     for child in root.glob("thumbcache_*.db"):
+        if _cancel_requested(report):
+            break
         _remove_path(child, report, root)
     if report.bytes_freed > before:
         report.notes.append("缩略图缓存")
 
 
-def run_selective_clean(scopes: list[str] | set[str] | None = None) -> CleanReport:
+def run_selective_clean(
+    scopes: list[str] | set[str] | None = None,
+    *, on_progress: Callable[[CleanProgress], None] | None = None,
+    cancel_event: threading.Event | None = None,
+) -> CleanReport:
     """Clean only selected scopes. None uses safe defaults; empty means nothing."""
     report = CleanReport()
     chosen = set(scopes) if scopes is not None else set(DEFAULT_SCOPES)
+    tasks = {"browser": _clean_browser, "temp": _clean_temp,
+             "prefetch": _clean_prefetch, "thumbs": _clean_thumbs,
+             "recycle": empty_recycle_bin, "wu": clean_windows_update_download,
+             "delivery": clean_delivery_optimization}
+    selected = [(key, label) for key, label, _ in CLEAN_SCOPES if key in chosen]
+    context = _CleanContext(on_progress, cancel_event, len(selected))
+    report._context = context
     if not chosen:
         report.notes.append("未选择任何清理范围")
+        report._context = None
         return report
-    if "browser" in chosen:
-        _clean_browser(report)
-    if "temp" in chosen:
-        _clean_temp(report)
-    if "prefetch" in chosen:
-        _clean_prefetch(report)
-    if "thumbs" in chosen:
-        _clean_thumbs(report)
-    if "recycle" in chosen:
-        empty_recycle_bin(report)
-    if "wu" in chosen:
-        clean_windows_update_download(report)
-    if "delivery" in chosen:
-        clean_delivery_optimization(report)
-    if not report.notes and report.files_removed == 0 and not report.errors:
+    for scope, label in selected:
+        if _cancel_requested(report):
+            break
+        context.scope, context.label, context.item = scope, label, ""
+        context.notify(report, force=True)
+        if _cancel_requested(report):
+            break
+        try:
+            tasks[scope](report)
+        except Exception as exc:
+            report.failed = True
+            report.errors.append(f"{label}: {exc}")
+        if _cancel_requested(report):
+            break
+        context.completed += 1
+        context.notify(report, force=True)
+    context.notify(report, force=True)
+    report._context = None
+    if not report.cancelled and not report.notes and report.files_removed == 0 and not report.errors:
         report.notes.append("没有找到可清理的垃圾（或文件正在被占用）")
     return report
 
@@ -366,9 +462,16 @@ def run_deep_clean() -> CleanReport:
 def run_deep_clean_async(
     on_done: Callable[[CleanReport], None],
     scopes: list[str] | set[str] | None = None,
-) -> None:
+    *, on_progress: Callable[[CleanProgress], None] | None = None,
+    cancel_event: threading.Event | None = None,
+) -> threading.Thread:
     def worker() -> None:
-        report = run_selective_clean(scopes)
+        try:
+            report = run_selective_clean(scopes, on_progress=on_progress, cancel_event=cancel_event)
+        except Exception as exc:
+            report = CleanReport(failed=True, errors=[f"清理异常：{exc}"])
         on_done(report)
 
-    threading.Thread(target=worker, daemon=True).start()
+    thread = threading.Thread(target=worker, daemon=True, name="ComputerCleaner")
+    thread.start()
+    return thread
