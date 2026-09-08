@@ -236,6 +236,8 @@ class FloatingWorldClock(QWidget):
         self.setWindowFlags(flags)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.resize(680, 430)
+        from skin import get_app_version
+        self.setWindowTitle(f"Clock/Alarm v{get_app_version()}")
         self.setMinimumSize(220, 100)
         self.setMouseTracking(True)
         self._drag_pos = None
@@ -371,6 +373,9 @@ class FloatingWorldClock(QWidget):
             section_row.addWidget(btn)
             self.section_buttons.append(btn)
         section_row.addStretch(1)
+        from skin import make_version_badge
+        self.ver_badge = make_version_badge(self)
+        section_row.addWidget(self.ver_badge)
 
         self.pin_btn = QPushButton()
         self.pin_btn.setObjectName("windowButton")
@@ -405,7 +410,8 @@ class FloatingWorldClock(QWidget):
         # Reuse the existing controls and timer state in a separate window.
         self.tools_window = QFrame(self, Qt.WindowType.Window)
         self.tools_window.setObjectName("bg_widget")
-        self.tools_window.setWindowTitle("Clock/Alarm — 闹钟 / 世界时钟 / 倒计时")
+        from skin import get_app_version, make_version_badge
+        self.tools_window.setWindowTitle(f"Clock/Alarm v{get_app_version()} — 闹钟 / 世界时钟 / 倒计时")
         self.tools_window.resize(680, 520)
         self.tools_window.setMinimumSize(480, 360)
         self.tools_window.setStyleSheet(self.bg_widget.styleSheet() + """
@@ -424,6 +430,8 @@ class FloatingWorldClock(QWidget):
             button.clicked.connect(lambda checked=False, i=index: self.show_tools(i))
             tabs.addWidget(button)
             self.tools_buttons.append(button)
+        tabs.addStretch(1)
+        tabs.addWidget(make_version_badge(self.tools_window))
         tools_layout.addLayout(tabs)
         tools_layout.addWidget(self.details_panel)
         self.details_panel.show()
@@ -1170,7 +1178,8 @@ class AlarmRingingDialog(QDialog):
     def __init__(self, alarm_data: dict, parent=None):
         super().__init__(parent)
         self.alarm_data = alarm_data
-        self.setWindowTitle("闹钟提醒 - Clock/Alarm")
+        from skin import get_app_version, make_version_badge
+        self.setWindowTitle(f"闹钟提醒 - Clock/Alarm v{get_app_version()}")
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
@@ -1206,6 +1215,7 @@ class AlarmRingingDialog(QDialog):
         icon_lbl = QLabel("⏰ 闹钟响铃提醒")
         icon_lbl.setStyleSheet("color: #ff2a6d; font-size: 16px; font-weight: 800; border: none; background: transparent;")
         top_row.addWidget(icon_lbl, 1)
+        top_row.addWidget(make_version_badge(self))
         bl.addLayout(top_row)
 
         alarm_time = str(self.alarm_data.get("time") or datetime.datetime.now().strftime("%H:%M"))

@@ -246,7 +246,7 @@ class ClockAlarmApp(QObject):
 
         if self.recorder_board is None:
             self.recorder_board = FloatingRecorderBoard(self._cb(), self.store.state)
-        self.recorder_board.show()
+        self.recorder_board.showNormal()
         self.recorder_board.raise_()
 
     def show_world_clock(self) -> None:

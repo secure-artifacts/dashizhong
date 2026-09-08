@@ -42,7 +42,7 @@ class RecoveryTests(unittest.TestCase):
     def test_double_stop_opens_one_nonblocking_dialog_even_when_paused(self):
         factory = Mock()
         board = SimpleNamespace(recorder=Mock(is_paused=True), _busy_stop=False,
-                                _closing=False, embedded=False, show=Mock(), raise_=Mock(),
+                                _closing=False, embedded=False, showNormal=Mock(), raise_=Mock(),
                                 _set_status=Mock(), txt_save_dir=Mock(),
                                 _timestamp=lambda: 'test', _save_dialog_finished=Mock())
         board.txt_save_dir.text.return_value = 'recordings'
@@ -112,6 +112,13 @@ class RecoveryTests(unittest.TestCase):
         buttons[2].setChecked.assert_called_once_with(True)
         buttons[0].setChecked.assert_called_once_with(False)
 
+    def test_capture_error_offers_save_instead_of_discarding_recording(self):
+        board = SimpleNamespace(recorder=SimpleNamespace(is_recording=False, _error='window closed'),
+                                _busy_stop=False, duration_timer=Mock(), _stop=Mock(), _set_status=Mock())
+        method('recorder_ui.py', 'FloatingRecorderBoard', '_tick')(board)
+        board._stop.assert_called_once()
+        self.assertIn('window closed', board._set_status.call_args.args[0])
+
 
 class AudioStartupTests(unittest.TestCase):
     def setUp(self):
@@ -123,7 +130,7 @@ class AudioStartupTests(unittest.TestCase):
         self.threading = Mock()
         self.ffmpeg = Mock(return_value='ffmpeg.exe')
         ns = dict(queue=queue, sd=self.sd, wave=self.wave, threading=self.threading,
-                  _ffmpeg_bin=self.ffmpeg)
+                  _ffmpeg_bin=self.ffmpeg, AudioLevels=Mock())
         exec(compile(ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[])),
                      'screen_recorder.py', 'exec'), ns)
         self.AudioRecorder = ns['AudioRecorder']

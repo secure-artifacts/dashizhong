@@ -242,7 +242,8 @@ def _selected_cleaner_scopes(state: dict) -> list[str]:
 class _StyledDialog(QDialog):
     def __init__(self, title: str, parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle(title)
+        from skin import get_app_version, make_version_badge
+        self.setWindowTitle(f"Clock/Alarm v{get_app_version()} — {title}")
         self.setMinimumWidth(520)
         self.setStyleSheet(
             """
@@ -289,6 +290,14 @@ class SettingsDialog(_StyledDialog):
 
         main_layout = QVBoxLayout(self)
         main_layout.setSpacing(12)
+
+        header_row = QHBoxLayout()
+        title_lbl = QLabel("⚙️ Clock/Alarm 系统设置")
+        title_lbl.setStyleSheet("font-size: 15px; font-weight: 800; color: #38bdf8;")
+        header_row.addWidget(title_lbl)
+        header_row.addStretch(1)
+        header_row.addWidget(make_version_badge(self))
+        main_layout.addLayout(header_row)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -532,6 +541,14 @@ class CleanerDialog(_StyledDialog):
         self.resize(600, 520)
 
         layout = QVBoxLayout(self)
+        header_row = QHBoxLayout()
+        title_lbl = QLabel("🧹 Clock/Alarm 电脑清理")
+        title_lbl.setStyleSheet("font-size: 15px; font-weight: 800; color: #38bdf8;")
+        header_row.addWidget(title_lbl)
+        header_row.addStretch(1)
+        header_row.addWidget(make_version_badge(self))
+        layout.addLayout(header_row)
+
         intro = QLabel("请选择本次要清理的项目。未勾选的范围不会被访问。")
         intro.setWordWrap(True)
         layout.addWidget(intro)
@@ -624,9 +641,13 @@ class CleanerProgressDialog(_StyledDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 18, 20, 18)
         layout.setSpacing(12)
+        top_h = QHBoxLayout()
         self.status = QLabel("正在准备清理…")
         self.status.setStyleSheet("font-size:18px; font-weight:700; color:#38bdf8;")
-        layout.addWidget(self.status)
+        top_h.addWidget(self.status)
+        top_h.addStretch(1)
+        top_h.addWidget(make_version_badge(self))
+        layout.addLayout(top_h)
         scope_label = QLabel("本次项目：" + "、".join(labels[s] for s in scopes if s in labels))
         scope_label.setWordWrap(True)
         layout.addWidget(scope_label)

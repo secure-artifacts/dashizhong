@@ -27,6 +27,7 @@ from typing import Callable
 import cv2
 import numpy as np
 import sounddevice as sd
+from audio_monitor import AudioLevels
 import win32api
 import win32con
 import win32gui
@@ -176,7 +177,7 @@ def get_window_list(*, browsers_only: bool = False) -> list[dict]:
                     "id": f"hwnd:{hwnd}",
                     "hwnd": int(hwnd),
                     "kind": kind,
-                    "title": prefix + title[:90],
+                    "title": prefix + title,
                     "class": cls,
                     "left": rect[0],
                     "top": rect[1],
@@ -275,8 +276,9 @@ def _silent_subprocess_kwargs() -> dict:
 
 def capture_window_locked(hwnd: int) -> np.ndarray | None:
     """Capture a specific target window directly, locked to its HWND even if occluded or background."""
-    if not hwnd or not win32gui.IsWindow(hwnd):
+    if not hwnd or not win32gui.IsWindow(hwnd) or win32gui.IsIconic(hwnd):
         return None
+    hwnd_dc = mfc_dc = save_dc = bmp = previous = None
     try:
         rect = win32gui.GetWindowRect(hwnd)
         w = max(2, rect[2] - rect[0])
@@ -289,7 +291,8 @@ def capture_window_locked(hwnd: int) -> np.ndarray | None:
         save_dc = mfc_dc.CreateCompatibleDC()
         bmp = win32ui.CreateBitmap()
         bmp.CreateCompatibleBitmap(mfc_dc, w, h)
-        save_dc.SelectObject(bmp)
+        previous = save_dc.SelectObject(bmp)
+        save_dc.PatBlt((0, 0), (w, h), win32con.BLACKNESS)
 
         # PW_RENDERFULLCONTENT = 2 (Windows 8.1 / 10 / 11 DWM hardware-accelerated window capture)
         res = ctypes.windll.user32.PrintWindow(hwnd, save_dc.GetSafeHdc(), 2)
@@ -300,15 +303,32 @@ def capture_window_locked(hwnd: int) -> np.ndarray | None:
         img = np.frombuffer(bits, dtype=np.uint8).reshape((h, w, 4))
         bgr = img[:, :, :3].copy()
 
-        win32gui.DeleteObject(bmp.GetHandle())
-        save_dc.DeleteDC()
-        mfc_dc.DeleteDC()
-        win32gui.ReleaseDC(hwnd, hwnd_dc)
-
-        if res != 0 and np.any(bgr):
+        if res != 0:
             return bgr
     except Exception:
         pass
+    finally:
+        if save_dc and previous:
+            try:
+                save_dc.SelectObject(previous)
+            except Exception:
+                pass
+        for resource in (save_dc, mfc_dc):
+            if resource:
+                try:
+                    resource.DeleteDC()
+                except Exception:
+                    pass
+        if bmp:
+            try:
+                win32gui.DeleteObject(bmp.GetHandle())
+            except Exception:
+                pass
+        if hwnd_dc:
+            try:
+                win32gui.ReleaseDC(hwnd, hwnd_dc)
+            except Exception:
+                pass
     return None
 
 
@@ -316,10 +336,10 @@ def capture_bgr(region: dict | None = None, target: dict | None = None) -> np.nd
     """Capture region or locked window target as BGR uint8 array."""
     if target:
         hwnd = int(target.get("hwnd") or 0)
-        if hwnd > 0 and win32gui.IsWindow(hwnd):
-            locked_frame = capture_window_locked(hwnd)
-            if locked_frame is not None:
-                return locked_frame
+        if hwnd > 0 or target.get("kind") in ("browser", "window", "chat", "document"):
+            # Never replace a selected window with a desktop-region capture.
+            # Missing/minimized/unsupported windows fail closed instead.
+            return capture_window_locked(hwnd)
 
     if mss is not None:
         try:
@@ -378,9 +398,21 @@ def resolve_region(target: dict | None) -> dict | None:
     hwnd = int(target.get("hwnd") or 0)
     if hwnd > 0 and win32gui.IsWindow(hwnd):
         try:
-            # Prefer restored geometry
-            rect = win32gui.GetWindowRect(hwnd)
-            left, top, right, bottom = rect
+            import ctypes
+            from ctypes import wintypes
+
+            rect = wintypes.RECT()
+            hr = ctypes.windll.dwmapi.DwmGetWindowAttribute(
+                wintypes.HWND(hwnd),
+                ctypes.c_uint(9),  # DWMWA_EXTENDED_FRAME_BOUNDS
+                ctypes.byref(rect),
+                ctypes.sizeof(rect),
+            )
+            if hr == 0:
+                left, top, right, bottom = rect.left, rect.top, rect.right, rect.bottom
+            else:
+                rect = win32gui.GetWindowRect(hwnd)
+                left, top, right, bottom = rect
             return {
                 "left": left,
                 "top": top,
@@ -388,7 +420,16 @@ def resolve_region(target: dict | None) -> dict | None:
                 "height": max(2, bottom - top),
             }
         except Exception:
-            pass
+            try:
+                rect = win32gui.GetWindowRect(hwnd)
+                return {
+                    "left": rect[0],
+                    "top": rect[1],
+                    "width": max(2, rect[2] - rect[0]),
+                    "height": max(2, rect[3] - rect[1]),
+                }
+            except Exception:
+                pass
     # Screen region stored on target
     if all(k in target for k in ("left", "top", "width", "height")):
         return {
@@ -476,6 +517,7 @@ class AudioRecorder:
         self.stream_sys = None
         self.wav_file = None
         self.write_thread = None
+        self.levels = AudioLevels()
 
     def start(self) -> None:
         if self.is_recording:
@@ -499,6 +541,7 @@ class AudioRecorder:
                 def cb(data, frames, t, status):
                     if self.is_recording and not self.is_paused:
                         self.q_mic.put(data.copy())
+                    self.levels.feed('mic', data, status)
 
                 self.stream_mic = sd.InputStream(
                     device=self.mic_idx, channels=1, samplerate=self.sample_rate, callback=cb
@@ -512,6 +555,7 @@ class AudioRecorder:
                 def cb(data, frames, t, status):
                     if self.is_recording and not self.is_paused:
                         self.q_sys.put(data.copy())
+                    self.levels.feed('sys', data, status)
 
                 ch = 2
                 try:

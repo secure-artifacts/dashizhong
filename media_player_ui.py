@@ -461,7 +461,8 @@ class MediaPlayerWindow(QWidget):
         super().__init__(parent)
         self.state = state if isinstance(state, dict) else {}
         self.save_state = save_state
-        self.setWindowTitle("Clock/Alarm - Player")
+        from skin import get_app_version, make_version_badge
+        self.setWindowTitle(f"Clock/Alarm v{get_app_version()} - 视频播放器")
         self.resize(1040, 700)
         self.setMinimumSize(540, 360)
 
@@ -742,6 +743,7 @@ class MediaPlayerWindow(QWidget):
         list_title = QLabel("播放列表")
         list_title.setStyleSheet("font-weight: 700; font-size: 14px; color: #f8fafc;")
         top_row.addWidget(list_title)
+        top_row.addWidget(make_version_badge(self))
         top_row.addStretch()
 
         self.open_file_btn = QPushButton()
@@ -1373,7 +1375,7 @@ class MediaPlayerWindow(QWidget):
                                   self.player.setPosition(p) if r == self._current_request_id else None)
             self.is_playing_state = True
             self.play_btn.setIcon(self._pause_icon)
-            self.setWindowTitle(f"Clock/Alarm - {title}")
+            self.setWindowTitle(f"Clock/Alarm v{get_app_version()} - {title}")
             self._scroll_to_current_playlist_item()
         finally:
             self._is_changing_media = False

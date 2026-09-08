@@ -31,7 +31,8 @@ class SyntheticStream:
     def start(self):
         self.active = True
         def feed():
-            samples = np.zeros((441, self.channels), dtype=np.float32)
+            tone = np.sin(np.arange(441) * .12).astype(np.float32) * .3
+            samples = np.column_stack([tone * (-1 if ch else 1) for ch in range(self.channels)])
             while self.active:
                 self.callback(samples, len(samples), None, None)
                 time.sleep(0.01)
@@ -101,32 +102,71 @@ def main():
         board.resize(820, 780)
         print('PASS: panel grows/shrinks; compact settings scroll', flush=True)
 
+        panel = board.audio_panel
+        assert not hasattr(panel, 'test_button'), 'Audio preview should be automatic'
+        pump(3, until=lambda: panel.system.snapshot is not None)
+        assert panel.mic.snapshot[1][0][0] > .2
+        assert len(panel.system.snapshot[1]) == 2
+        first_preview = panel.preview
+        board.cmb_sys.setCurrentIndex(0)
+        pump(3, until=lambda: panel.preview is not first_preview and not first_preview.alive)
+        assert panel.system.snapshot is None
+        board.cmb_sys.setCurrentIndex(board.cmb_sys.count() - 1)
+        pump(3, until=lambda: panel.system.snapshot is not None)
+        if os.environ.get('RECORDER_TEST_SCREENSHOTS'):
+            board.controls_pane.ensureWidgetVisible(panel)
+            pump()
+            board.grab().save(str(Path(os.environ['RECORDER_TEST_SCREENSHOTS']) / 'recorder-audio.png'))
+        pump(3, until=lambda: panel.mic.snapshot is not None)
+        hidden_preview = panel.preview
+        board.hide()
+        pump(3, until=lambda: not hidden_preview.alive)
+        assert not panel.wanted
+        board.show()
+        pump()
+        print('PASS: automatic waveform, stereo levels, switch and release on hide', flush=True)
+
         ticks = []
         timer = QTimer()
         timer.timeout.connect(lambda: ticks.append(time.monotonic()))
         timer.start(10)
         try:
             for iteration in range(3):
+                if iteration == 0:
+                    pump(3, until=lambda: panel.mic.snapshot is not None)
+                    old_preview = panel.preview
                 board.btn_rec.click()
+                pump(3, until=lambda: board.recorder is not None)
                 assert board.recorder and board.recorder.is_recording, board.lbl_status.text()
+                if iteration == 0:
+                    assert not old_preview.alive, 'Preview must close before recording opens audio'
                 pump(0.55)
+                assert board.recorder.audio_recorder.levels.snapshot('mic') is not None
                 bar = board.control_bar
-                bar.move(100, 500)
-                bar.btn_brush.click()
+                assert board.isMinimized(), 'Recording must minimize to taskbar'
+                assert not bar.isVisible()
+                assert not board.overlay.isVisible()
+                board.showNormal()
                 pump()
-                assert board.overlay.is_draw_mode
-                point = bar.frameGeometry().center() - board.overlay.geometry().topLeft()
-                assert not board.overlay.mask().contains(point), 'Overlay covers recording buttons'
-                bar.btn_brush.click()
-                assert not board.overlay.is_draw_mode
-                assert board.overlay.testAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+                assert board.isVisible() and panel.mic.snapshot is not None
+                assert board.windowFlags() & Qt.WindowType.Window
+                assert not board.windowFlags() & Qt.WindowType.WindowStaysOnTopHint
+                for control in (board.cmb_target, board.cmb_res, board.cmb_mic, board.cmb_sys,
+                                board.spin_fps, board.chk_cursor, board.slider_cursor, board.btn_brush,
+                                board.btn_refresh_targets, board.btn_save_dir, board.txt_save_dir):
+                    assert not control.isEnabled(), 'Recording settings must be locked'
+                assert board.preview_label.pixmap() is not None
                 for _ in range(4):
-                    bar.btn_pause.click()
+                    board.btn_pause.click()
                 assert not board.recorder.is_paused
-                bar.btn_pause.click()
+                board.btn_pause.click()
                 assert board.recorder.is_paused
-                assert bar.pos() == QPoint(100, 500), 'Pause moved the toolbar'
-                bar.btn_stop.click()
+                assert not bar.isVisible()
+                assert not board.cmb_target.isEnabled(), 'Pause must not unlock settings'
+                board.close()
+                assert board.isMinimized() and board.recorder.is_recording
+                board.showNormal()
+                board.btn_stop.click()
                 dialog = board._save_dialog
                 assert dialog and dialog.testOption(QFileDialog.Option.DontUseNativeDialog)
                 assert not board.overlay.isVisible() and not bar.isVisible()

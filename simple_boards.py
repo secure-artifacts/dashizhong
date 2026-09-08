@@ -71,6 +71,13 @@ def _board_qss(bg: str = "#bfdbfe", accent: str = "#4f46e5") -> str:
     QLabel#title {{
         color: {fg}; font-size: 16px; font-weight: 900; background: transparent;
     }}
+    QLabel#versionBadge {{
+        color: {muted}; background: {item_bg};
+        border: 1px solid {"rgba(0,0,0,0.14)" if light else "rgba(255,255,255,0.14)"};
+        border-radius: 4px; padding: 1px 5px;
+        font-family: 'Consolas', 'Segoe UI', monospace;
+        font-size: 10px; font-weight: 700;
+    }}
     QLineEdit, QTextEdit, QListWidget {{
         background: {input_bg}; color: {fg};
         border: none; border-radius: 8px; padding: 6px;
@@ -438,6 +445,8 @@ class TodoBoard(_DragBase):
         self._collapsed = False
         self._full_h = 430
         self.resize(380, self._full_h)
+        from skin import get_app_version, make_version_badge
+        self.setWindowTitle(f"Clock/Alarm v{get_app_version()} — 待办")
         self._build()
         self._apply_color()
         self.refresh()
@@ -448,15 +457,12 @@ class TodoBoard(_DragBase):
     def _summary_title(self) -> str:
         items = self.mgr.list_items()
         open_items = [str(t.get("text") or "").strip() for t in items if not t.get("done")]
-        open_items = [t for t in open_items if t]
-        title = self.title_edit.text().strip() or str(self.board.get("title") or "待办")
+        done = len(items) - len(open_items)
         n = len(items)
-        done = n - len(open_items)
+        title = str(self.board.get("title") or "待办").strip()
         if open_items:
             first = open_items[0]
-            if len(first) > 14:
-                first = first[:14] + "…"
-            extra = f" 等{len(open_items)}项" if len(open_items) > 1 else ""
+            extra = f" (+{len(open_items)-1})" if len(open_items) > 1 else ""
             return f"{title} · ☐ {first}{extra}"
         if n:
             return f"{title} · 全部完成 ({done}/{n})"
@@ -481,6 +487,9 @@ class TodoBoard(_DragBase):
         self.title_edit.setMinimumHeight(28)
         self.title_edit.editingFinished.connect(self._rename)
         head.addWidget(self.title_edit, 1)
+        from skin import make_version_badge
+        self.ver_badge = make_version_badge(self)
+        head.addWidget(self.ver_badge)
 
         # Cute buttons with tooltips
         self.btn_new = QPushButton("➕")
@@ -880,6 +889,8 @@ class StickyNoteWindow(_DragBase):
         self.on_add_note = on_add_note
         self.on_open_manager = on_open_manager
         self.resize(320, 300)
+        from skin import get_app_version, make_version_badge
+        self.setWindowTitle(f"Clock/Alarm v{get_app_version()} — 便签")
         self.color = str(note.get("color") or NOTE_COLORS[0])
         self._pinned = True
         self._collapsed = False
@@ -900,6 +911,8 @@ class StickyNoteWindow(_DragBase):
         self.title.setObjectName("noteTitle")
         self.title.setPlaceholderText("便签标题…")
         head.addWidget(self.title, 1)
+        self.ver_badge = make_version_badge(self)
+        head.addWidget(self.ver_badge)
 
         # Cute buttons with tooltips
         self.btn_new = QPushButton("➕", objectName="soft")
@@ -1185,7 +1198,8 @@ class NotesListWindow(QWidget):
     def __init__(self, ctl: NotesController, parent=None):
         super().__init__(parent)
         self.ctl = ctl
-        self.setWindowTitle("📋 历史便签管理")
+        from skin import get_app_version, make_version_badge
+        self.setWindowTitle(f"Clock/Alarm v{get_app_version()} — 📋 历史便签管理")
         self.resize(440, 540)
         self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.WindowStaysOnTopHint)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
@@ -1237,6 +1251,7 @@ class NotesListWindow(QWidget):
         lbl_title = QLabel("📋 历史便签库")
         lbl_title.setStyleSheet("font-size: 18px; font-weight: 900; color: #38bdf8;")
         head.addWidget(lbl_title)
+        head.addWidget(make_version_badge(self))
         head.addStretch()
 
         btn_new = QPushButton("➕ 新建便签", objectName="primary")
@@ -1390,7 +1405,8 @@ class TodoBoardsListWindow(QWidget):
     def __init__(self, ctl: TodosController, parent=None):
         super().__init__(parent)
         self.ctl = ctl
-        self.setWindowTitle("📋 待办清单管理")
+        from skin import get_app_version, make_version_badge
+        self.setWindowTitle(f"Clock/Alarm v{get_app_version()} — 📋 待办清单管理")
         self.resize(440, 540)
         self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.WindowStaysOnTopHint)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
@@ -1431,6 +1447,7 @@ class TodoBoardsListWindow(QWidget):
         lbl_title = QLabel("📋 待办清单库")
         lbl_title.setStyleSheet("font-size: 18px; font-weight: 900; color: #34d399;")
         head.addWidget(lbl_title)
+        head.addWidget(make_version_badge(self))
         head.addStretch()
 
         btn_new = QPushButton("➕ 新建待办板", objectName="primary")
