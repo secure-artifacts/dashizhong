@@ -39,6 +39,7 @@ from PyQt6.QtWidgets import (
 )
 
 from audio_monitor_ui import AudioMonitorPanel
+from skin import get_app_version, make_version_badge
 import screen_recorder
 
 

@@ -35,6 +35,7 @@ from PyQt6.QtWidgets import (
 import pytz
 
 from alarm_sounds import RINGTONES, ensure_ringtones, play_ringtone, stop_ringtone
+from skin import get_app_version, make_version_badge
 
 
 def style_combo_popup(combo: QComboBox) -> None:

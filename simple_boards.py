@@ -22,6 +22,7 @@ from PyQt6.QtWidgets import (
 )
 
 from productivity import NoteManager, TodoBoardsStore, TodoManager
+from skin import get_app_version, make_version_badge
 
 NOTE_COLORS = [
     "#fef08a",

@@ -30,6 +30,7 @@ from PyQt6.QtWidgets import (
 
 from autostart import is_autostart_enabled, set_autostart
 from cleaner import CLEAN_SCOPES, DEFAULT_SCOPES, CleanProgress, CleanReport
+from skin import get_app_version, make_version_badge
 
 
 RISKY_CLEAN_SCOPES = {"prefetch", "recycle", "wu", "delivery"}

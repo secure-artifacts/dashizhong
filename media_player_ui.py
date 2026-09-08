@@ -21,6 +21,7 @@ from PyQt6.QtGui import (
     QPainterPath, QFont
 )
 import yt_dlp
+from skin import get_app_version, make_version_badge
 
 MAX_INPUT_URLS = 20
 MAX_URL_LENGTH = 2048
