@@ -14,7 +14,8 @@ from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PyQt6.QtMultimediaWidgets import QVideoWidget
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QPlainTextEdit,
-    QLabel, QFileDialog, QSlider, QListWidget, QListWidgetItem, QMenu, QSizePolicy
+    QLabel, QFileDialog, QSlider, QListWidget, QListWidgetItem, QMenu, QSizePolicy,
+    QDialog, QLineEdit, QCheckBox, QComboBox, QScrollArea, QFrame, QMessageBox
 )
 from PyQt6.QtGui import (
     QKeyEvent, QAction, QIcon, QPixmap, QPainter, QPen, QColor,
@@ -22,6 +23,7 @@ from PyQt6.QtGui import (
 )
 import yt_dlp
 from skin import get_app_version, make_version_badge
+from yt_feed_monitor import resolve_channel_id, YouTubeFeedMonitor
 
 MAX_INPUT_URLS = 20
 MAX_URL_LENGTH = 2048
@@ -260,6 +262,19 @@ def _draw_playlist_icon(p, s, c):
     p.drawLine(QPointF(s * 0.20, s * 0.72), QPointF(s * 0.60, s * 0.72))
 
 
+def _draw_youtube_icon(p, s, c):
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QColor('#ff0033'))
+    p.drawRoundedRect(QRectF(s * 0.12, s * 0.22, s * 0.76, s * 0.56), 3, 3)
+    p.setBrush(QColor('#ffffff'))
+    tri = QPainterPath()
+    tri.moveTo(s * 0.40, s * 0.35)
+    tri.lineTo(s * 0.66, s * 0.50)
+    tri.lineTo(s * 0.40, s * 0.65)
+    tri.closeSubpath()
+    p.drawPath(tri)
+
+
 # ─── YtDlp Workers ────────────────────────────────────────────────────────
 
 class YtDlpWorker(QObject):
@@ -455,13 +470,395 @@ class YtDlpStreamWorker(QObject):
         return thread
 
 
-# ─── Media Player Window ──────────────────────────────────────────────────
+# ─── YouTube Subscriptions Dialog ──────────────────────────────────────────
 
-class MediaPlayerWindow(QWidget):
-    def __init__(self, parent=None, *, state=None, save_state=None):
+class YouTubeSubscriptionsDialog(QDialog):
+    def __init__(self, parent=None, *, state=None, save_state=None, feed_monitor=None):
         super().__init__(parent)
         self.state = state if isinstance(state, dict) else {}
         self.save_state = save_state
+        self.feed_monitor = feed_monitor
+        self.setWindowTitle(f"Clock/Alarm v{get_app_version()} - YouTube 频道关注与订阅")
+        self.resize(560, 540)
+        self.setMinimumSize(480, 400)
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #0f172a;
+                color: #f8fafc;
+                font-family: 'Segoe UI', system-ui, sans-serif;
+            }
+            QLabel {
+                color: #cbd5e1;
+            }
+            QLineEdit {
+                background: #1e293b;
+                border: 1px solid #334155;
+                border-radius: 6px;
+                padding: 7px 10px;
+                color: #ffffff;
+                font-size: 13px;
+            }
+            QLineEdit:focus {
+                border: 1px solid #38bdf8;
+            }
+            QPushButton {
+                background: #1e293b;
+                border: 1px solid #334155;
+                border-radius: 6px;
+                padding: 6px 12px;
+                color: #f8fafc;
+                font-size: 12px;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background: #334155;
+            }
+            QPushButton#primary {
+                background: #0284c7;
+                border: 1px solid #0284c7;
+                color: #ffffff;
+            }
+            QPushButton#primary:hover {
+                background: #0369a1;
+            }
+            QCheckBox {
+                color: #e2e8f0;
+                font-size: 12px;
+                spacing: 6px;
+            }
+            QCheckBox::indicator {
+                width: 16px;
+                height: 16px;
+                border-radius: 4px;
+                border: 1px solid #475569;
+                background: #1e293b;
+            }
+            QCheckBox::indicator:checked {
+                background: #0284c7;
+                border-color: #38bdf8;
+            }
+            QComboBox {
+                background: #1e293b;
+                border: 1px solid #334155;
+                border-radius: 6px;
+                padding: 4px 8px;
+                color: #f8fafc;
+                font-size: 12px;
+            }
+            QComboBox::drop-down {
+                border: none;
+            }
+            QScrollArea {
+                border: 1px solid #334155;
+                background: #0b0f17;
+                border-radius: 8px;
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 16, 18, 16)
+        layout.setSpacing(12)
+
+        # Header
+        hdr = QHBoxLayout()
+        title_lbl = QLabel("YouTube 频道关注与更新追踪")
+        title_lbl.setStyleSheet("font-size: 16px; font-weight: bold; color: #ffffff;")
+        hdr.addWidget(title_lbl)
+        hdr.addWidget(make_version_badge(self))
+        hdr.addStretch()
+        layout.addLayout(hdr)
+
+        desc_lbl = QLabel("特别关注的频道一旦有新视频发布，将第一时间自动收录进播放列表，并发送桌面通知。无需 API Key，零配额消耗。")
+        desc_lbl.setWordWrap(True)
+        desc_lbl.setStyleSheet("color: #94a3b8; font-size: 12px; line-height: 1.4;")
+        layout.addWidget(desc_lbl)
+
+        # Input Row
+        input_row = QHBoxLayout()
+        input_row.setSpacing(8)
+        self.input_field = QLineEdit()
+        self.input_field.setPlaceholderText("输入频道链接或 @Handle (例如 @mkbhd 或 https://youtube.com/@mkbhd)")
+        self.input_field.returnPressed.connect(self._add_channel)
+        input_row.addWidget(self.input_field, stretch=1)
+
+        self.add_btn = QPushButton("添加关注")
+        self.add_btn.setObjectName("primary")
+        self.add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.add_btn.clicked.connect(self._add_channel)
+        input_row.addWidget(self.add_btn)
+        layout.addLayout(input_row)
+
+        self.status_lbl = QLabel("")
+        self.status_lbl.setStyleSheet("color: #38bdf8; font-size: 11px;")
+        layout.addWidget(self.status_lbl)
+
+        # Channel Cards Scroll Area
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll_content = QWidget()
+        self.scroll_content.setStyleSheet("background: transparent;")
+        self.cards_layout = QVBoxLayout(self.scroll_content)
+        self.cards_layout.setContentsMargins(8, 8, 8, 8)
+        self.cards_layout.setSpacing(8)
+        self.scroll.setWidget(self.scroll_content)
+        layout.addWidget(self.scroll, stretch=1)
+
+        # Settings Options
+        media_cfg = self.state.setdefault("media", {})
+        opts_box = QVBoxLayout()
+        opts_box.setSpacing(6)
+
+        opts_row = QHBoxLayout()
+        self.auto_add_cb = QCheckBox("发现新视频自动加入播放列表")
+        self.auto_add_cb.setChecked(bool(media_cfg.get("auto_add_to_playlist", True)))
+        self.auto_add_cb.toggled.connect(self._on_auto_add_toggled)
+        opts_row.addWidget(self.auto_add_cb)
+
+        self.notify_cb = QCheckBox("发现新视频发送桌面气泡通知")
+        self.notify_cb.setChecked(bool(media_cfg.get("notify_on_new_video", True)))
+        self.notify_cb.toggled.connect(self._on_notify_toggled)
+        opts_row.addWidget(self.notify_cb)
+        opts_box.addLayout(opts_row)
+        layout.addLayout(opts_box)
+
+        # Bottom row: Check interval + Check Now button + Close
+        bottom_row = QHBoxLayout()
+        bottom_row.setSpacing(8)
+
+        interval_lbl = QLabel("检查频率:")
+        interval_lbl.setStyleSheet("color: #94a3b8; font-size: 12px;")
+        bottom_row.addWidget(interval_lbl)
+
+        self.interval_combo = QComboBox()
+        self.interval_combo.addItem("每 15 分钟", 15)
+        self.interval_combo.addItem("每 30 分钟 (推荐)", 30)
+        self.interval_combo.addItem("每 1 小时", 60)
+        self.interval_combo.addItem("每 2 小时", 120)
+        self.interval_combo.addItem("每 4 小时", 240)
+
+        current_mins = int(media_cfg.get("subscription_check_mins", 30))
+        for i in range(self.interval_combo.count()):
+            if self.interval_combo.itemData(i) == current_mins:
+                self.interval_combo.setCurrentIndex(i)
+                break
+        self.interval_combo.currentIndexChanged.connect(self._on_interval_changed)
+        bottom_row.addWidget(self.interval_combo)
+
+        bottom_row.addStretch()
+
+        self.check_now_btn = QPushButton("🔄 立即检查更新")
+        self.check_now_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.check_now_btn.clicked.connect(self._check_now)
+        bottom_row.addWidget(self.check_now_btn)
+
+        self.close_btn = QPushButton("关闭")
+        self.close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.close_btn.clicked.connect(self.accept)
+        bottom_row.addWidget(self.close_btn)
+
+        layout.addLayout(bottom_row)
+
+        self._populate_channels()
+
+    def _populate_channels(self):
+        while self.cards_layout.count():
+            item = self.cards_layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.deleteLater()
+
+        media_cfg = self.state.setdefault("media", {})
+        subs = media_cfg.get("subscriptions", [])
+
+        if not subs:
+            empty_lbl = QLabel("暂未关注任何 YouTube 频道\n在上方输入频道链接或 @Handle 开始关注")
+            empty_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            empty_lbl.setStyleSheet("color: #64748b; font-size: 13px; padding: 40px;")
+            self.cards_layout.addWidget(empty_lbl)
+            self.cards_layout.addStretch()
+            return
+
+        for sub in subs:
+            card = QFrame()
+            card.setStyleSheet("""
+                QFrame {
+                    background-color: #1e293b;
+                    border: 1px solid #334155;
+                    border-radius: 8px;
+                    padding: 4px;
+                }
+            """)
+            card_layout = QHBoxLayout(card)
+            card_layout.setContentsMargins(10, 8, 10, 8)
+            card_layout.setSpacing(10)
+
+            # Left badge / icon
+            yt_icon_lbl = QLabel()
+            yt_icon_lbl.setPixmap(_make_icon(_draw_youtube_icon, 24).pixmap(24, 24))
+            card_layout.addWidget(yt_icon_lbl)
+
+            # Info vbox
+            info_box = QVBoxLayout()
+            info_box.setSpacing(2)
+
+            title_str = sub.get("title") or sub.get("channel_id") or "Unknown Channel"
+            c_title = QLabel(str(title_str))
+            c_title.setStyleSheet("font-weight: bold; font-size: 13px; color: #f8fafc;")
+            info_box.addWidget(c_title)
+
+            handle_str = sub.get("handle") or sub.get("channel_id") or ""
+            c_sub = QLabel(str(handle_str))
+            c_sub.setStyleSheet("font-size: 11px; color: #94a3b8;")
+            info_box.addWidget(c_sub)
+
+            if sub.get("last_checked_title"):
+                latest_text = f"最新: {sub['last_checked_title']}"
+                if len(latest_text) > 42:
+                    latest_text = latest_text[:40] + "…"
+                c_latest = QLabel(latest_text)
+                c_latest.setStyleSheet("font-size: 11px; color: #38bdf8;")
+                info_box.addWidget(c_latest)
+
+            card_layout.addLayout(info_box, stretch=1)
+
+            # Status / Toggle
+            enabled = sub.get("enabled", True)
+            toggle_btn = QPushButton("已启用" if enabled else "已停用")
+            toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            if enabled:
+                toggle_btn.setStyleSheet("background: #064e3b; color: #34d399; border: 1px solid #059669; font-size: 11px; padding: 4px 8px;")
+            else:
+                toggle_btn.setStyleSheet("background: #334155; color: #94a3b8; border: 1px solid #475569; font-size: 11px; padding: 4px 8px;")
+            chid = sub.get("channel_id")
+            toggle_btn.clicked.connect(lambda *args, cid=chid, en=enabled: self._toggle_channel(cid, not en))
+            card_layout.addWidget(toggle_btn)
+
+            # Delete
+            del_btn = QPushButton("取消关注")
+            del_btn.setObjectName("danger")
+            del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            del_btn.setStyleSheet("background: rgba(239,68,68,0.15); color: #fca5a5; border: 1px solid rgba(239,68,68,0.4); font-size: 11px; padding: 4px 8px;")
+            del_btn.clicked.connect(lambda *args, cid=chid: self._delete_channel(cid))
+            card_layout.addWidget(del_btn)
+
+            self.cards_layout.addWidget(card)
+
+        self.cards_layout.addStretch()
+
+    def _add_channel(self):
+        text = self.input_field.text().strip()
+        if not text:
+            return
+        self.add_btn.setEnabled(False)
+        self.status_lbl.setText("正在解析 YouTube 频道信息，请稍候...")
+
+        def _worker():
+            try:
+                res = resolve_channel_id(text)
+            except Exception:
+                res = None
+            QTimer.singleShot(0, lambda: self._on_channel_resolved(res))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_channel_resolved(self, res):
+        self.add_btn.setEnabled(True)
+        if not res:
+            self.status_lbl.setText("未能识别该频道，请确认链接或 @Handle 是否准确。")
+            return
+
+        if self.feed_monitor:
+            self.feed_monitor.add_subscription(res)
+        else:
+            media_cfg = self.state.setdefault("media", {})
+            subs = media_cfg.setdefault("subscriptions", [])
+            for s in subs:
+                if s.get("channel_id") == res.get("channel_id"):
+                    s.update(res)
+                    break
+            else:
+                res["enabled"] = True
+                res["initial_baseline_done"] = True
+                subs.append(res)
+            if self.save_state:
+                self.save_state()
+
+        self.input_field.clear()
+        self.status_lbl.setText(f"已成功关注频道: {res.get('title')}")
+        self._populate_channels()
+
+    def _toggle_channel(self, chid: str, new_state: bool):
+        if self.feed_monitor:
+            self.feed_monitor.toggle_subscription(chid, new_state)
+        else:
+            media_cfg = self.state.setdefault("media", {})
+            for s in media_cfg.get("subscriptions", []):
+                if s.get("channel_id") == chid:
+                    s["enabled"] = new_state
+                    break
+            if self.save_state:
+                self.save_state()
+        self._populate_channels()
+
+    def _delete_channel(self, chid: str):
+        if self.feed_monitor:
+            self.feed_monitor.remove_subscription(chid)
+        else:
+            media_cfg = self.state.setdefault("media", {})
+            media_cfg["subscriptions"] = [s for s in media_cfg.get("subscriptions", []) if s.get("channel_id") != chid]
+            if self.save_state:
+                self.save_state()
+        self.status_lbl.setText("已取消关注该频道")
+        self._populate_channels()
+
+    def _on_auto_add_toggled(self, checked: bool):
+        self.state.setdefault("media", {})["auto_add_to_playlist"] = checked
+        if self.save_state:
+            self.save_state()
+
+    def _on_notify_toggled(self, checked: bool):
+        self.state.setdefault("media", {})["notify_on_new_video"] = checked
+        if self.save_state:
+            self.save_state()
+
+    def _on_interval_changed(self):
+        mins = self.interval_combo.currentData()
+        if mins and self.feed_monitor:
+            self.feed_monitor.update_check_interval(mins)
+        elif mins:
+            self.state.setdefault("media", {})["subscription_check_mins"] = mins
+            if self.save_state:
+                self.save_state()
+
+    def _check_now(self):
+        self.check_now_btn.setEnabled(False)
+        self.status_lbl.setText("正在后台检索频道更新...")
+
+        def _on_done(count):
+            def _ui():
+                self.check_now_btn.setEnabled(True)
+                if count > 0:
+                    self.status_lbl.setText(f"检查完成！共发现 {count} 个新上传视频")
+                else:
+                    self.status_lbl.setText("检查完成，关注的频道暂无新视频。")
+                self._populate_channels()
+            QTimer.singleShot(0, _ui)
+
+        if self.feed_monitor:
+            self.feed_monitor.check_now_async(on_finish=_on_done)
+        else:
+            QTimer.singleShot(500, lambda: _on_done(0))
+
+
+# ─── Media Player Window ──────────────────────────────────────────────────
+
+class MediaPlayerWindow(QWidget):
+    def __init__(self, parent=None, *, state=None, save_state=None, feed_monitor=None):
+        super().__init__(parent)
+        self.state = state if isinstance(state, dict) else {}
+        self.save_state = save_state
+        self.feed_monitor = feed_monitor
         from skin import get_app_version, make_version_badge
         self.setWindowTitle(f"Clock/Alarm v{get_app_version()} - 视频播放器")
         self.resize(1040, 700)
@@ -746,6 +1143,19 @@ class MediaPlayerWindow(QWidget):
         top_row.addWidget(list_title)
         top_row.addWidget(make_version_badge(self))
         top_row.addStretch()
+
+        self.subs_btn = QPushButton()
+        self.subs_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.subs_btn.setIcon(_make_icon(_draw_youtube_icon, 18))
+        self.subs_btn.setIconSize(QSize(18, 18))
+        self.subs_btn.setFixedSize(32, 32)
+        self.subs_btn.setStyleSheet(
+            "background: #1e293b; border: 1px solid #334155; border-radius: 6px;"
+        )
+        self.subs_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.subs_btn.setToolTip("YouTube 频道关注与订阅追踪")
+        self.subs_btn.clicked.connect(self._open_subscriptions_dialog)
+        top_row.addWidget(self.subs_btn)
 
         self.open_file_btn = QPushButton()
         self.open_file_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -1091,6 +1501,33 @@ class MediaPlayerWindow(QWidget):
         self.slider.setValue(0)
         self.time_label.setText("00:00 / 00:00")
         self.status_label.setText("")
+
+    # ── Subscriptions & Feeds ──
+
+    def _open_subscriptions_dialog(self):
+        dialog = YouTubeSubscriptionsDialog(
+            self,
+            state=self.state,
+            save_state=self.save_state,
+            feed_monitor=self.feed_monitor,
+        )
+        dialog.exec()
+
+    def add_feed_videos(self, videos: list[dict]):
+        if not videos:
+            return
+        added = 0
+        for v in videos:
+            title = f"[更新 · {v['channel_title']}] {v['title']}"
+            url = v["url"]
+            if any(u == url for _, u in self.playlist):
+                continue
+            self.playlist.append((title, url))
+            self.queue_list.addItem(title)
+            added += 1
+        if added:
+            self._persist_playlist()
+            self.status_label.setText(f"已收录 {added} 个订阅新视频")
 
     # ── File & Queue ──
 

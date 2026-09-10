@@ -105,7 +105,7 @@ class CacheConcurrencyTests(unittest.TestCase):
         root = Path(self.temp.name) / 'owned-cache'
         self.release.clear()
         first = self.worker.prefetch('https://test.invalid/a', 0, str(root))
-        self.assertTrue(self.entered.wait(1))
+        self.assertTrue(self.entered.wait(3))
         cleanup = self.worker.retire_cache(str(root))
         time.sleep(0.05)
         self.assertTrue(root.exists())

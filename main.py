@@ -119,6 +119,17 @@ class ClockAlarmApp(QObject):
         self.alarm_timer = QTimer(self)
         self.alarm_timer.timeout.connect(self._alarm_tick)
         self.alarm_timer.start(1000)
+
+        from yt_feed_monitor import YouTubeFeedMonitor
+
+        self.feed_monitor = YouTubeFeedMonitor(
+            state=self.store.state,
+            save_state=self.store.save_state,
+            parent=self,
+        )
+        self.feed_monitor.new_videos_signal.connect(self._on_new_youtube_videos)
+        self._last_notified_video_url = None
+
         self.store.append_log("login", "Clock/Alarm started")
         video_arg = _get_video_from_argv()
         if video_arg:
@@ -164,6 +175,7 @@ class ClockAlarmApp(QObject):
         tray.setContextMenu(menu)
         tray.setToolTip("Clock/Alarm")
         tray.activated.connect(self._tray_activated)
+        tray.messageClicked.connect(self._on_tray_message_clicked)
         tray.show()
         return tray
 
@@ -270,6 +282,7 @@ class ClockAlarmApp(QObject):
             self.media_player_board = MediaPlayerWindow(
                 state=self.store.state,
                 save_state=self.store.save_state,
+                feed_monitor=getattr(self, "feed_monitor", None),
             )
         self.media_player_board.show()
         self.media_player_board.raise_()
@@ -293,6 +306,57 @@ class ClockAlarmApp(QObject):
                 self.media_player_board.queue_list.addItem(title)
                 self.media_player_board._persist_playlist()
                 self.media_player_board.play_index(len(self.media_player_board.playlist) - 1)
+
+    def _on_new_youtube_videos(self, videos: list[dict]) -> None:
+        if not videos:
+            return
+        media_cfg = self.store.state.setdefault("media", {})
+        auto_add = bool(media_cfg.get("auto_add_to_playlist", True))
+        notify = bool(media_cfg.get("notify_on_new_video", True))
+
+        # 1. Update playlist
+        if auto_add:
+            if self.media_player_board is not None:
+                self.media_player_board.add_feed_videos(videos)
+            else:
+                playlist = media_cfg.setdefault("playlist", [])
+                max_limit = max(1, min(500, int(media_cfg.get("playlist_limit") or 100)))
+                for v in videos:
+                    tag = f"[更新 · {v['channel_title']}] {v['title']}"
+                    url = v["url"]
+                    if not any(
+                        (isinstance(item, dict) and item.get("url") == url)
+                        or (isinstance(item, (list, tuple)) and len(item) >= 2 and item[1] == url)
+                        for item in playlist
+                    ):
+                        playlist.append({"title": tag, "url": url})
+                if len(playlist) > max_limit:
+                    media_cfg["playlist"] = playlist[-max_limit:]
+                self.store.save_state()
+
+        # 2. Tray notification
+        if notify and getattr(self, "tray", None):
+            latest = videos[0]
+            self._last_notified_video_url = latest.get("url")
+            count = len(videos)
+            if count == 1:
+                title_msg = f"YouTube 订阅更新 · {latest.get('channel_title')}"
+                body_msg = f"发布了新视频：\n{latest.get('title')}"
+            else:
+                title_msg = f"YouTube 关注频道有 {count} 个新更新"
+                body_msg = f"【{latest.get('channel_title')}】{latest.get('title')}\n等共 {count} 个视频"
+            self.tray.showMessage(
+                title_msg,
+                body_msg,
+                QSystemTrayIcon.MessageIcon.Information,
+                8000,
+            )
+
+    def _on_tray_message_clicked(self) -> None:
+        if getattr(self, "_last_notified_video_url", None):
+            self.show_media_player_with_video(self._last_notified_video_url)
+        else:
+            self.show_media_player2()
 
     def show_settings(self) -> None:
         from settings_ui import SettingsDialog
