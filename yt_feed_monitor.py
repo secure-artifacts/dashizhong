@@ -5,6 +5,7 @@ Fetches official YouTube Atom feeds for subscribed channels without requiring AP
 
 from __future__ import annotations
 
+import gzip
 import logging
 import re
 import threading
@@ -28,6 +29,38 @@ YT_NS = "{http://www.youtube.com/xml/schemas/2015}"
 MEDIA_NS = "{http://search.yahoo.com/mrss/}"
 
 MAX_SEEN_IDS = 500
+
+
+def http_get(url: str, timeout: int = 8) -> str:
+    """
+    High-speed HTTP GET with automatic gzip decompression, browser headers,
+    and transparent local proxy fallback (e.g. Clash/V2Ray on ports 10808, 7890, 10809).
+    """
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Accept-Encoding": "gzip, deflate",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    }
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read()
+            if resp.headers.get("Content-Encoding") == "gzip" or raw[:2] == b"\x1f\x8b":
+                return gzip.decompress(raw).decode("utf-8", errors="replace")
+            return raw.decode("utf-8", errors="replace")
+    except Exception as direct_err:
+        for proxy_url in ["http://127.0.0.1:10808", "http://127.0.0.1:7890", "http://127.0.0.1:10809"]:
+            try:
+                proxy_handler = urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
+                opener = urllib.request.build_opener(proxy_handler)
+                with opener.open(req, timeout=timeout) as resp:
+                    raw = resp.read()
+                    if resp.headers.get("Content-Encoding") == "gzip" or raw[:2] == b"\x1f\x8b":
+                        return gzip.decompress(raw).decode("utf-8", errors="replace")
+                    return raw.decode("utf-8", errors="replace")
+            except Exception:
+                continue
+        raise direct_err
 
 
 def parse_atom_feed(xml_text: str) -> dict[str, Any]:
@@ -94,22 +127,20 @@ def parse_atom_feed(xml_text: str) -> dict[str, Any]:
     }
 
 
-def fetch_channel_feed(channel_id: str, timeout: int = 10) -> dict[str, Any]:
+def fetch_channel_feed(channel_id: str, timeout: int = 8) -> dict[str, Any]:
     """Fetch and parse the official YouTube RSS feed for given channel ID."""
     url = f"https://www.youtube.com/feeds/videos.xml?channel_id={urllib.parse.quote(channel_id)}"
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        content = resp.read().decode("utf-8", errors="replace")
+    content = http_get(url, timeout=timeout)
     feed_data = parse_atom_feed(content)
     if not feed_data.get("channel_id"):
         feed_data["channel_id"] = channel_id
     return feed_data
 
 
-def resolve_channel_id(input_str: str, timeout: int = 10) -> Optional[dict[str, Any]]:
+def resolve_channel_id(input_str: str, timeout: int = 8) -> Optional[dict[str, Any]]:
     """
     Resolve channel handle, URL, or channel ID into channel details.
-    Returns dict with keys: channel_id, title, handle, url, rss_url
+    Returns dict with keys: channel_id, title, handle, url, rss_url, entries
     or None if unresolved.
     """
     clean_input = input_str.strip()
@@ -128,6 +159,7 @@ def resolve_channel_id(input_str: str, timeout: int = 10) -> Optional[dict[str, 
                 "handle": "",
                 "url": f"https://www.youtube.com/channel/{chid}",
                 "rss_url": f"https://www.youtube.com/feeds/videos.xml?channel_id={chid}",
+                "entries": feed.get("entries", []),
             }
         except Exception as e:
             logger.warning(f"Error fetching feed for pure ID {chid}: {e}")
@@ -137,6 +169,7 @@ def resolve_channel_id(input_str: str, timeout: int = 10) -> Optional[dict[str, 
                 "handle": "",
                 "url": f"https://www.youtube.com/channel/{chid}",
                 "rss_url": f"https://www.youtube.com/feeds/videos.xml?channel_id={chid}",
+                "entries": [],
             }
 
     # Case 2: URL with /channel/UC...
@@ -146,14 +179,17 @@ def resolve_channel_id(input_str: str, timeout: int = 10) -> Optional[dict[str, 
         try:
             feed = fetch_channel_feed(chid, timeout=timeout)
             title = feed.get("channel_title") or chid
+            entries = feed.get("entries", [])
         except Exception:
             title = chid
+            entries = []
         return {
             "channel_id": chid,
             "title": title,
             "handle": "",
             "url": f"https://www.youtube.com/channel/{chid}",
             "rss_url": f"https://www.youtube.com/feeds/videos.xml?channel_id={chid}",
+            "entries": entries,
         }
 
     # Case 3: Handle (e.g. @mkbhd or https://youtube.com/@mkbhd)
@@ -168,28 +204,21 @@ def resolve_channel_id(input_str: str, timeout: int = 10) -> Optional[dict[str, 
             probe_url = f"https://www.youtube.com/@{clean_input.lstrip('/')}"
 
     try:
-        req = urllib.request.Request(probe_url, headers={"User-Agent": USER_AGENT})
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            html = resp.read().decode("utf-8", errors="replace")
+        html = http_get(probe_url, timeout=timeout)
 
         # Probe for channel ID
         chid = ""
-        # 1) canonical link
-        m = re.search(r'<link\s+rel="canonical"\s+href="https://www\.youtube\.com/channel/(UC[a-zA-Z0-9_-]{22})"', html)
+        m = re.search(
+            r'(?:<link\s+rel="canonical"\s+href="https://www\.youtube\.com/channel/'
+            r'|<meta\s+itemprop="(?:identifier|channelId)"\s+content="'
+            r'|"(?:browse_id|channelId)"\s*:\s*"'
+            r'|channel/(UC[a-zA-Z0-9_-]{22}))(UC[a-zA-Z0-9_-]{22})?',
+            html,
+        )
         if m:
-            chid = m.group(1)
-        # 2) itemprop identifier / channelId
-        if not chid:
-            m = re.search(r'<meta\s+itemprop="(?:identifier|channelId)"\s+content="(UC[a-zA-Z0-9_-]{22})"', html)
-            if m:
-                chid = m.group(1)
-        # 3) JSON browse_id or channelId
-        if not chid:
-            m = re.search(r'"(?:browse_id|channelId)"\s*:\s*"(UC[a-zA-Z0-9_-]{22})"', html)
-            if m:
-                chid = m.group(1)
+            chid = m.group(1) or m.group(2) or ""
 
-        # Title from HTML og:title or title
+        # Title from HTML og:title or title tag (preferred over feed to avoid mojibake)
         channel_title = ""
         tm = re.search(r'<meta\s+property="og:title"\s+content="([^"]+)"', html)
         if tm:
@@ -199,11 +228,12 @@ def resolve_channel_id(input_str: str, timeout: int = 10) -> Optional[dict[str, 
             if tm:
                 channel_title = tm.group(1).replace(" - YouTube", "").strip()
 
+        entries = []
         if chid:
-            # If feed has better title, fetch it
             try:
-                feed = fetch_channel_feed(chid, timeout=min(5, timeout))
-                if feed.get("channel_title"):
+                feed = fetch_channel_feed(chid, timeout=min(6, timeout))
+                entries = feed.get("entries", [])
+                if not channel_title and feed.get("channel_title"):
                     channel_title = feed["channel_title"]
             except Exception:
                 pass
@@ -214,9 +244,10 @@ def resolve_channel_id(input_str: str, timeout: int = 10) -> Optional[dict[str, 
                 "handle": handle,
                 "url": f"https://www.youtube.com/channel/{chid}",
                 "rss_url": f"https://www.youtube.com/feeds/videos.xml?channel_id={chid}",
+                "entries": entries,
             }
     except Exception as e:
-        logger.warning(f"HTML probe failed for {probe_url}: {e}")
+        logger.warning(f"Fast probe failed for {probe_url}: {e}")
 
     # Fallback: yt_dlp flat extraction if installed
     try:
@@ -226,6 +257,7 @@ def resolve_channel_id(input_str: str, timeout: int = 10) -> Optional[dict[str, 
             "quiet": True,
             "no_warnings": True,
             "skip_download": True,
+            "socket_timeout": 6,
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(probe_url, download=False)
@@ -239,6 +271,7 @@ def resolve_channel_id(input_str: str, timeout: int = 10) -> Optional[dict[str, 
                         "handle": handle,
                         "url": f"https://www.youtube.com/channel/{chid}",
                         "rss_url": f"https://www.youtube.com/feeds/videos.xml?channel_id={chid}",
+                        "entries": [],
                     }
     except Exception as e:
         logger.debug(f"yt_dlp fallback failed: {e}")
@@ -394,15 +427,20 @@ class YouTubeFeedMonitor(QObject):
 
         # Pre-seed seen_video_ids with channel's current videos to avoid flooding
         seen_ids = set(media_state.get("seen_video_ids", []))
-        try:
-            feed = fetch_channel_feed(chid, timeout=8)
-            for entry in feed.get("entries", []):
-                seen_ids.add(entry["video_id"])
-            if feed.get("entries"):
-                channel_data["last_checked_title"] = feed["entries"][0]["title"]
-                channel_data["last_checked_time"] = feed["entries"][0]["published"]
-        except Exception as e:
-            logger.warning(f"Could not pre-seed feed for {chid}: {e}")
+        entries = channel_data.get("entries")
+        if not entries:
+            try:
+                feed = fetch_channel_feed(chid, timeout=6)
+                entries = feed.get("entries", [])
+            except Exception as e:
+                logger.warning(f"Could not pre-seed feed for {chid}: {e}")
+                entries = []
+
+        for entry in (entries or []):
+            seen_ids.add(entry["video_id"])
+        if entries:
+            channel_data["last_checked_title"] = entries[0]["title"]
+            channel_data["last_checked_time"] = entries[0].get("published", "")
 
         channel_data["initial_baseline_done"] = True
         channel_data.setdefault("enabled", True)

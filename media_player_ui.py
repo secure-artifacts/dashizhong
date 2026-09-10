@@ -751,42 +751,53 @@ class YouTubeSubscriptionsDialog(QDialog):
         if not text:
             return
         self.add_btn.setEnabled(False)
-        self.status_lbl.setText("正在解析 YouTube 频道信息，请稍候...")
+        self.status_lbl.setText("正在连接 YouTube 解析频道信息，请稍候...")
 
         def _worker():
             try:
-                res = resolve_channel_id(text)
-            except Exception:
-                res = None
-            QTimer.singleShot(0, lambda: self._on_channel_resolved(res))
+                res = resolve_channel_id(text, timeout=8)
+                if not res:
+                    QTimer.singleShot(0, lambda: self._on_channel_add_failed("未能识别该频道，请确认网络连接或链接 / @Handle 是否准确。"))
+                    return
+
+                # Add to subscription inside worker thread (non-blocking)
+                if self.feed_monitor:
+                    self.feed_monitor.add_subscription(res)
+                else:
+                    media_cfg = self.state.setdefault("media", {})
+                    subs = media_cfg.setdefault("subscriptions", [])
+                    for s in subs:
+                        if s.get("channel_id") == res.get("channel_id"):
+                            s.update(res)
+                            break
+                    else:
+                        res["enabled"] = True
+                        res["initial_baseline_done"] = True
+                        subs.append(res)
+                    if self.save_state:
+                        self.save_state()
+
+                QTimer.singleShot(0, lambda r=res: self._on_channel_add_success(r))
+            except Exception as e:
+                QTimer.singleShot(0, lambda err=str(e): self._on_channel_add_failed(f"解析出错: {err}"))
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _on_channel_resolved(self, res):
+    def _on_channel_add_success(self, res):
         self.add_btn.setEnabled(True)
-        if not res:
-            self.status_lbl.setText("未能识别该频道，请确认链接或 @Handle 是否准确。")
-            return
-
-        if self.feed_monitor:
-            self.feed_monitor.add_subscription(res)
-        else:
-            media_cfg = self.state.setdefault("media", {})
-            subs = media_cfg.setdefault("subscriptions", [])
-            for s in subs:
-                if s.get("channel_id") == res.get("channel_id"):
-                    s.update(res)
-                    break
-            else:
-                res["enabled"] = True
-                res["initial_baseline_done"] = True
-                subs.append(res)
-            if self.save_state:
-                self.save_state()
-
         self.input_field.clear()
-        self.status_lbl.setText(f"已成功关注频道: {res.get('title')}")
+        self.status_lbl.setText(f"✓ 已成功关注频道: {res.get('title')}")
         self._populate_channels()
+
+    def _on_channel_add_failed(self, msg):
+        self.add_btn.setEnabled(True)
+        self.status_lbl.setText(msg)
+
+    def _on_channel_resolved(self, res):
+        if res:
+            self._on_channel_add_success(res)
+        else:
+            self._on_channel_add_failed("未能识别该频道，请确认链接或 @Handle 是否准确。")
 
     def _toggle_channel(self, chid: str, new_state: bool):
         if self.feed_monitor:
