@@ -5,9 +5,11 @@ from __future__ import annotations
 import os
 import hashlib
 import random
+import re
 import shutil
 import tempfile
 import threading
+import uuid
 from pathlib import Path
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject, QRectF, QPointF, QSize, QUrl
 from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
@@ -577,7 +579,7 @@ class YouTubeSubscriptionsDialog(QDialog):
         input_row = QHBoxLayout()
         input_row.setSpacing(8)
         self.input_field = QLineEdit()
-        self.input_field.setPlaceholderText("输入频道链接或 @Handle (例如 @mkbhd 或 https://youtube.com/@mkbhd)")
+        self.input_field.setPlaceholderText("输入或批量粘贴频道链接/@Handle（支持同时添加多个，换行/逗号/空格分隔）")
         self.input_field.returnPressed.connect(self._add_channel)
         input_row.addWidget(self.input_field, stretch=1)
 
@@ -672,7 +674,7 @@ class YouTubeSubscriptionsDialog(QDialog):
         subs = media_cfg.get("subscriptions", [])
 
         if not subs:
-            empty_lbl = QLabel("暂未关注任何 YouTube 频道\n在上方输入频道链接或 @Handle 开始关注")
+            empty_lbl = QLabel("暂未关注任何 YouTube 频道\n在上方输入频道链接或 @Handle 开始关注（支持批量多频道）")
             empty_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
             empty_lbl.setStyleSheet("color: #64748b; font-size: 13px; padding: 40px;")
             self.cards_layout.addWidget(empty_lbl)
@@ -680,14 +682,26 @@ class YouTubeSubscriptionsDialog(QDialog):
             return
 
         for sub in subs:
+            status = sub.get("status", "active")
             card = QFrame()
-            card.setStyleSheet("""
-                QFrame {
-                    background-color: #1e293b;
-                    border: 1px solid #334155;
+            card.setObjectName("channelCard")
+            if status == "resolving":
+                border_style = "border: 1px solid #0284c7; background-color: #0f233a;"
+            elif status == "error":
+                border_style = "border: 1px solid rgba(239,68,68,0.5); background-color: #26171a;"
+            else:
+                border_style = "border: 1px solid #334155; background-color: #1e293b;"
+
+            card.setStyleSheet(f"""
+                #channelCard {{
+                    {border_style}
                     border-radius: 8px;
                     padding: 4px;
-                }
+                }}
+                QLabel {{
+                    border: none;
+                    background: transparent;
+                }}
             """)
             card_layout = QHBoxLayout(card)
             card_layout.setContentsMargins(10, 8, 10, 8)
@@ -707,12 +721,21 @@ class YouTubeSubscriptionsDialog(QDialog):
             c_title.setStyleSheet("font-weight: bold; font-size: 13px; color: #f8fafc;")
             info_box.addWidget(c_title)
 
-            handle_str = sub.get("handle") or sub.get("channel_id") or ""
+            handle_str = sub.get("handle") or sub.get("raw_input") or sub.get("channel_id") or ""
             c_sub = QLabel(str(handle_str))
             c_sub.setStyleSheet("font-size: 11px; color: #94a3b8;")
             info_box.addWidget(c_sub)
 
-            if sub.get("last_checked_title"):
+            # Status message or latest video
+            if status == "resolving":
+                c_status = QLabel(sub.get("status_msg") or "⏳ 正在后台极速解析...")
+                c_status.setStyleSheet("font-size: 11px; color: #38bdf8; font-weight: 500;")
+                info_box.addWidget(c_status)
+            elif status == "error":
+                c_err = QLabel(sub.get("status_msg") or "⚠️ 解析失败 (点击重试)")
+                c_err.setStyleSheet("font-size: 11px; color: #f87171;")
+                info_box.addWidget(c_err)
+            elif sub.get("last_checked_title"):
                 latest_text = f"最新: {sub['last_checked_title']}"
                 if len(latest_text) > 42:
                     latest_text = latest_text[:40] + "…"
@@ -722,25 +745,49 @@ class YouTubeSubscriptionsDialog(QDialog):
 
             card_layout.addLayout(info_box, stretch=1)
 
-            # Status / Toggle
-            enabled = sub.get("enabled", True)
-            toggle_btn = QPushButton("已启用" if enabled else "已停用")
-            toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            if enabled:
-                toggle_btn.setStyleSheet("background: #064e3b; color: #34d399; border: 1px solid #059669; font-size: 11px; padding: 4px 8px;")
-            else:
-                toggle_btn.setStyleSheet("background: #334155; color: #94a3b8; border: 1px solid #475569; font-size: 11px; padding: 4px 8px;")
             chid = sub.get("channel_id")
-            toggle_btn.clicked.connect(lambda *args, cid=chid, en=enabled: self._toggle_channel(cid, not en))
-            card_layout.addWidget(toggle_btn)
+            temp_id = sub.get("temp_id") or chid
 
-            # Delete
-            del_btn = QPushButton("取消关注")
-            del_btn.setObjectName("danger")
-            del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            del_btn.setStyleSheet("background: rgba(239,68,68,0.15); color: #fca5a5; border: 1px solid rgba(239,68,68,0.4); font-size: 11px; padding: 4px 8px;")
-            del_btn.clicked.connect(lambda *args, cid=chid: self._delete_channel(cid))
-            card_layout.addWidget(del_btn)
+            if status == "resolving":
+                # Cancel button while resolving
+                cancel_btn = QPushButton("取消")
+                cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                cancel_btn.setStyleSheet("background: #334155; color: #94a3b8; border: 1px solid #475569; font-size: 11px; padding: 4px 8px;")
+                cancel_btn.clicked.connect(lambda *args, tid=temp_id: self._delete_channel(tid))
+                card_layout.addWidget(cancel_btn)
+            elif status == "error":
+                # Retry button
+                retry_btn = QPushButton("🔄 重试")
+                retry_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                retry_btn.setStyleSheet("background: #0369a1; color: #ffffff; border: 1px solid #38bdf8; font-size: 11px; padding: 4px 8px;")
+                retry_btn.clicked.connect(lambda *args, tid=temp_id: self._retry_channel(tid))
+                card_layout.addWidget(retry_btn)
+
+                # Delete button
+                del_btn = QPushButton("删除")
+                del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                del_btn.setStyleSheet("background: rgba(239,68,68,0.15); color: #fca5a5; border: 1px solid rgba(239,68,68,0.4); font-size: 11px; padding: 4px 8px;")
+                del_btn.clicked.connect(lambda *args, tid=temp_id: self._delete_channel(tid))
+                card_layout.addWidget(del_btn)
+            else:
+                # Active Status / Toggle
+                enabled = sub.get("enabled", True)
+                toggle_btn = QPushButton("已启用" if enabled else "已停用")
+                toggle_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                if enabled:
+                    toggle_btn.setStyleSheet("background: #064e3b; color: #34d399; border: 1px solid #059669; font-size: 11px; padding: 4px 8px;")
+                else:
+                    toggle_btn.setStyleSheet("background: #334155; color: #94a3b8; border: 1px solid #475569; font-size: 11px; padding: 4px 8px;")
+                toggle_btn.clicked.connect(lambda *args, cid=chid, en=enabled: self._toggle_channel(cid, not en))
+                card_layout.addWidget(toggle_btn)
+
+                # Delete
+                del_btn = QPushButton("取消关注")
+                del_btn.setObjectName("danger")
+                del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                del_btn.setStyleSheet("background: rgba(239,68,68,0.15); color: #fca5a5; border: 1px solid rgba(239,68,68,0.4); font-size: 11px; padding: 4px 8px;")
+                del_btn.clicked.connect(lambda *args, cid=chid: self._delete_channel(cid))
+                card_layout.addWidget(del_btn)
 
             self.cards_layout.addWidget(card)
 
@@ -750,54 +797,158 @@ class YouTubeSubscriptionsDialog(QDialog):
         text = self.input_field.text().strip()
         if not text:
             return
-        self.add_btn.setEnabled(False)
-        self.status_lbl.setText("正在连接 YouTube 解析频道信息，请稍候...")
+
+        # Batch parsing: split by newlines, commas, semicolons, or whitespace
+        raw_tokens = [t.strip() for t in re.split(r'[\r\n,;\s]+', text) if t.strip()]
+        if not raw_tokens:
+            return
+
+        # 0-Wait Optimistic Addition: Clear input box immediately, keep button active!
+        self.input_field.clear()
+        self.add_btn.setEnabled(True)
+
+        media_cfg = self.state.setdefault("media", {})
+        subs = media_cfg.setdefault("subscriptions", [])
+
+        # Track existing entries for deduplication
+        existing_keys = set()
+        for s in subs:
+            if s.get("channel_id"):
+                existing_keys.add(s["channel_id"].lower())
+            if s.get("handle"):
+                existing_keys.add(s["handle"].lower())
+            if s.get("raw_input"):
+                existing_keys.add(s["raw_input"].lower())
+
+        added_items = []
+        for raw in raw_tokens:
+            # Check if pure channel ID
+            direct_chid = ""
+            m_uc = re.search(r"UC[a-zA-Z0-9_-]{22}", raw)
+            if m_uc:
+                direct_chid = m_uc.group(0)
+
+            # Handle
+            handle_m = re.search(r"@([a-zA-Z0-9_.-]+)", raw)
+            handle_val = f"@{handle_m.group(1)}" if handle_m else ""
+
+            # Check duplicate
+            if (direct_chid and direct_chid.lower() in existing_keys) or \
+               (handle_val and handle_val.lower() in existing_keys) or \
+               (raw.lower() in existing_keys):
+                continue
+
+            temp_id = f"pending_{uuid.uuid4().hex[:8]}"
+            real_id = direct_chid or temp_id
+            title_display = handle_val or (f"频道 {direct_chid[:10]}…" if direct_chid else raw)
+
+            sub_item = {
+                "channel_id": real_id,
+                "temp_id": temp_id,
+                "raw_input": raw,
+                "title": title_display,
+                "handle": handle_val,
+                "url": f"https://www.youtube.com/channel/{real_id}" if direct_chid else (raw if raw.startswith("http") else f"https://www.youtube.com/{raw}"),
+                "enabled": True,
+                "status": "resolving",
+                "status_msg": "⏳ 正在后台极速解析...",
+                "initial_baseline_done": True,
+            }
+            subs.append(sub_item)
+            existing_keys.add(real_id.lower())
+            if handle_val:
+                existing_keys.add(handle_val.lower())
+            existing_keys.add(raw.lower())
+            added_items.append(sub_item)
+
+        if not added_items:
+            self.status_lbl.setText("所输入的频道均已在关注列表中，无需重复添加。")
+            return
+
+        if self.save_state:
+            self.save_state()
+
+        # Instant 0-Wait UI update: show all newly created cards in 0.01 seconds
+        self._populate_channels()
+        self.status_lbl.setText(f"✓ 已入库 {len(added_items)} 个频道，正在后台极速并发解析...")
+
+        # Fire concurrent background resolution workers
+        for item in added_items:
+            self._start_channel_resolution(item)
+
+    def _start_channel_resolution(self, sub_item: dict):
+        temp_id = sub_item.get("temp_id") or sub_item.get("channel_id")
+        raw_input = sub_item.get("raw_input") or sub_item.get("handle") or sub_item.get("channel_id")
 
         def _worker():
             try:
-                res = resolve_channel_id(text, timeout=8)
+                res = resolve_channel_id(raw_input, timeout=10)
                 if not res:
-                    QTimer.singleShot(0, lambda: self._on_channel_add_failed("未能识别该频道，请确认网络连接或链接 / @Handle 是否准确。"))
+                    QTimer.singleShot(0, lambda: self._on_resolution_failed(temp_id, "未能识别该频道，请确认链接或 @Handle 是否准确。"))
                     return
 
-                # Add to subscription inside worker thread (non-blocking)
+                # Add to feed monitor for seen IDs if active
                 if self.feed_monitor:
                     self.feed_monitor.add_subscription(res)
-                else:
-                    media_cfg = self.state.setdefault("media", {})
-                    subs = media_cfg.setdefault("subscriptions", [])
-                    for s in subs:
-                        if s.get("channel_id") == res.get("channel_id"):
-                            s.update(res)
-                            break
-                    else:
-                        res["enabled"] = True
-                        res["initial_baseline_done"] = True
-                        subs.append(res)
-                    if self.save_state:
-                        self.save_state()
 
-                QTimer.singleShot(0, lambda r=res: self._on_channel_add_success(r))
+                QTimer.singleShot(0, lambda r=res: self._on_resolution_succeeded(temp_id, r))
             except Exception as e:
-                QTimer.singleShot(0, lambda err=str(e): self._on_channel_add_failed(f"解析出错: {err}"))
+                QTimer.singleShot(0, lambda err=str(e): self._on_resolution_failed(temp_id, f"解析出错: {err}"))
 
         threading.Thread(target=_worker, daemon=True).start()
 
-    def _on_channel_add_success(self, res):
-        self.add_btn.setEnabled(True)
-        self.input_field.clear()
-        self.status_lbl.setText(f"✓ 已成功关注频道: {res.get('title')}")
+    def _on_resolution_succeeded(self, temp_id: str, res: dict):
+        media_cfg = self.state.setdefault("media", {})
+        subs = media_cfg.setdefault("subscriptions", [])
+        target = None
+        for s in subs:
+            if s.get("temp_id") == temp_id or s.get("channel_id") == temp_id:
+                target = s
+                break
+
+        if target:
+            target["channel_id"] = res.get("channel_id") or target.get("channel_id")
+            target["title"] = res.get("title") or target.get("title")
+            target["handle"] = res.get("handle") or target.get("handle")
+            target["url"] = res.get("url") or target.get("url")
+            target["rss_url"] = res.get("rss_url") or target.get("rss_url")
+            target["status"] = "active"
+            target["status_msg"] = ""
+            target["initial_baseline_done"] = True
+            if res.get("entries"):
+                target["last_checked_title"] = res["entries"][0]["title"]
+                target["last_checked_time"] = res["entries"][0].get("published", "")
+            if self.save_state:
+                self.save_state()
+
+        self.status_lbl.setText(f"✓ 已成功解析并监控: {res.get('title')}")
         self._populate_channels()
 
-    def _on_channel_add_failed(self, msg):
-        self.add_btn.setEnabled(True)
-        self.status_lbl.setText(msg)
+    def _on_resolution_failed(self, temp_id: str, msg: str):
+        media_cfg = self.state.setdefault("media", {})
+        subs = media_cfg.setdefault("subscriptions", [])
+        for s in subs:
+            if s.get("temp_id") == temp_id or s.get("channel_id") == temp_id:
+                s["status"] = "error"
+                s["status_msg"] = msg
+                break
+        if self.save_state:
+            self.save_state()
+        self.status_lbl.setText(f"⚠️ {msg}")
+        self._populate_channels()
 
-    def _on_channel_resolved(self, res):
-        if res:
-            self._on_channel_add_success(res)
-        else:
-            self._on_channel_add_failed("未能识别该频道，请确认链接或 @Handle 是否准确。")
+    def _retry_channel(self, target_id: str):
+        media_cfg = self.state.setdefault("media", {})
+        subs = media_cfg.setdefault("subscriptions", [])
+        for s in subs:
+            if s.get("temp_id") == target_id or s.get("channel_id") == target_id:
+                s["status"] = "resolving"
+                s["status_msg"] = "⏳ 正在重试解析..."
+                if self.save_state:
+                    self.save_state()
+                self._populate_channels()
+                self._start_channel_resolution(s)
+                break
 
     def _toggle_channel(self, chid: str, new_state: bool):
         if self.feed_monitor:
@@ -805,7 +956,7 @@ class YouTubeSubscriptionsDialog(QDialog):
         else:
             media_cfg = self.state.setdefault("media", {})
             for s in media_cfg.get("subscriptions", []):
-                if s.get("channel_id") == chid:
+                if s.get("channel_id") == chid or s.get("temp_id") == chid:
                     s["enabled"] = new_state
                     break
             if self.save_state:
@@ -815,12 +966,15 @@ class YouTubeSubscriptionsDialog(QDialog):
     def _delete_channel(self, chid: str):
         if self.feed_monitor:
             self.feed_monitor.remove_subscription(chid)
-        else:
-            media_cfg = self.state.setdefault("media", {})
-            media_cfg["subscriptions"] = [s for s in media_cfg.get("subscriptions", []) if s.get("channel_id") != chid]
-            if self.save_state:
-                self.save_state()
-        self.status_lbl.setText("已取消关注该频道")
+        media_cfg = self.state.setdefault("media", {})
+        subs = media_cfg.get("subscriptions", [])
+        media_cfg["subscriptions"] = [
+            s for s in subs
+            if s.get("channel_id") != chid and s.get("temp_id") != chid
+        ]
+        if self.save_state:
+            self.save_state()
+        self.status_lbl.setText("已移除该频道")
         self._populate_channels()
 
     def _on_auto_add_toggled(self, checked: bool):

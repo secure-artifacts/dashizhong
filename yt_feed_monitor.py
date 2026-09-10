@@ -8,6 +8,7 @@ from __future__ import annotations
 import gzip
 import logging
 import re
+import socket
 import threading
 import urllib.parse
 import urllib.request
@@ -30,11 +31,45 @@ MEDIA_NS = "{http://search.yahoo.com/mrss/}"
 
 MAX_SEEN_IDS = 500
 
+_WORKING_PROXY: Optional[str] = None
+_PROXY_DETECTED = False
+_PROXY_LOCK = threading.Lock()
+
+
+def detect_local_proxy(force_recheck: bool = False) -> Optional[str]:
+    """
+    Sub-millisecond probe for common local proxy ports (v2ray, clash, sing-box, etc.).
+    Prevents 8-second direct connection timeout stalls on GFW-restricted networks.
+    """
+    global _WORKING_PROXY, _PROXY_DETECTED
+    with _PROXY_LOCK:
+        if _PROXY_DETECTED and not force_recheck:
+            return _WORKING_PROXY
+
+        _PROXY_DETECTED = True
+        # Check standard local proxy ports
+        candidate_ports = (10808, 7890, 10809, 1080, 1082, 8080)
+        for port in candidate_ports:
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(0.04)
+                res = s.connect_ex(("127.0.0.1", port))
+                s.close()
+                if res == 0:
+                    _WORKING_PROXY = f"http://127.0.0.1:{port}"
+                    logger.info(f"Detected active local proxy: {_WORKING_PROXY}")
+                    return _WORKING_PROXY
+            except Exception:
+                continue
+
+        _WORKING_PROXY = None
+        return None
+
 
 def http_get(url: str, timeout: int = 8) -> str:
     """
     High-speed HTTP GET with automatic gzip decompression, browser headers,
-    and transparent local proxy fallback (e.g. Clash/V2Ray on ports 10808, 7890, 10809).
+    and automatic local proxy detection (e.g. Clash/V2Ray on ports 10808, 7890).
     """
     headers = {
         "User-Agent": USER_AGENT,
@@ -42,17 +77,37 @@ def http_get(url: str, timeout: int = 8) -> str:
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
     }
     req = urllib.request.Request(url, headers=headers)
+
+    # 1. Fast Path: Use detected local proxy immediately if available
+    proxy = detect_local_proxy()
+    if proxy:
+        try:
+            proxy_handler = urllib.request.ProxyHandler({"http": proxy, "https": proxy})
+            opener = urllib.request.build_opener(proxy_handler)
+            with opener.open(req, timeout=timeout) as resp:
+                raw = resp.read()
+                if resp.headers.get("Content-Encoding") == "gzip" or raw[:2] == b"\x1f\x8b":
+                    return gzip.decompress(raw).decode("utf-8", errors="replace")
+                return raw.decode("utf-8", errors="replace")
+        except Exception as proxy_err:
+            logger.debug(f"Detected proxy {proxy} request failed: {proxy_err}")
+
+    # 2. Try direct connection (with a moderate timeout)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=min(5, timeout)) as resp:
             raw = resp.read()
             if resp.headers.get("Content-Encoding") == "gzip" or raw[:2] == b"\x1f\x8b":
                 return gzip.decompress(raw).decode("utf-8", errors="replace")
             return raw.decode("utf-8", errors="replace")
     except Exception as direct_err:
-        for proxy_url in ["http://127.0.0.1:10808", "http://127.0.0.1:7890", "http://127.0.0.1:10809"]:
+        # 3. Fallback scan all common ports if direct failed
+        for p_port in (10808, 7890, 10809, 1080, 8080):
+            p_url = f"http://127.0.0.1:{p_port}"
+            if p_url == proxy:
+                continue
             try:
-                proxy_handler = urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
-                opener = urllib.request.build_opener(proxy_handler)
+                p_handler = urllib.request.ProxyHandler({"http": p_url, "https": p_url})
+                opener = urllib.request.build_opener(p_handler)
                 with opener.open(req, timeout=timeout) as resp:
                     raw = resp.read()
                     if resp.headers.get("Content-Encoding") == "gzip" or raw[:2] == b"\x1f\x8b":

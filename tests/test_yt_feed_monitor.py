@@ -219,5 +219,84 @@ class TestYouTubeFeedMonitor(unittest.TestCase):
         dlg._delete_channel("UCtest123")
         self.assertEqual(len(state["media"]["subscriptions"]), 0)
 
+    def test_detect_local_proxy(self):
+        # Test proxy detection with mock socket
+        with patch("socket.socket") as mock_sock_cls:
+            mock_sock = MagicMock()
+            mock_sock.connect_ex.return_value = 0  # port open
+            mock_sock_cls.return_value = mock_sock
+
+            proxy = yfm.detect_local_proxy(force_recheck=True)
+            self.assertIsNotNone(proxy)
+            self.assertTrue(proxy.startswith("http://127.0.0.1:"))
+
+    def test_batch_channel_addition_optimistic_ui(self):
+        from media_player_ui import YouTubeSubscriptionsDialog
+        saved = []
+        state = {
+            "media": {
+                "subscriptions": [],
+                "subscription_check_mins": 30,
+            }
+        }
+        dlg = YouTubeSubscriptionsDialog(
+            state=state,
+            save_state=lambda: saved.append(True),
+            feed_monitor=None,
+        )
+
+        # Batch input with multiple channels (newline and comma separated)
+        batch_input = """
+        https://www.youtube.com/@mkbhd
+        @LinusTechTips, UCbj0c5T2IVVNnL65rZp5-ow
+        """
+        dlg.input_field.setText(batch_input)
+
+        # Mock resolve_channel_id so worker threads do not make real network calls in test
+        with patch("media_player_ui.resolve_channel_id", return_value={
+            "channel_id": "UCbj0c5T2IVVNnL65rZp5-ow",
+            "title": "Mock Channel",
+            "handle": "@mock",
+            "entries": [{"video_id": "v1", "title": "Mock Title", "published": "2026-09-10"}],
+        }):
+            dlg._add_channel()
+
+            # 1. Input field must be cleared immediately (0 wait)
+            self.assertEqual(dlg.input_field.text(), "")
+            self.assertTrue(dlg.add_btn.isEnabled())
+
+            # 2. Subscriptions list must immediately contain all 3 items (optimistic addition)
+            subs = state["media"]["subscriptions"]
+            self.assertEqual(len(subs), 3)
+            # All 3 were created with resolving state
+            self.assertTrue(any(s["handle"] == "@mkbhd" for s in subs))
+            self.assertTrue(any(s["handle"] == "@LinusTechTips" for s in subs))
+            self.assertTrue(any(s["channel_id"] == "UCbj0c5T2IVVNnL65rZp5-ow" for s in subs))
+
+            # 3. Simulate successful resolution callback
+            temp_id = subs[0]["channel_id"]
+            dlg._on_resolution_succeeded(temp_id, {
+                "channel_id": "UCreal123",
+                "title": "MKBHD Official",
+                "handle": "@mkbhd",
+                "entries": [{"video_id": "v99", "title": "Phone Review 2026", "published": "2026-09-10"}],
+            })
+            self.assertEqual(subs[0]["status"], "active")
+            self.assertEqual(subs[0]["title"], "MKBHD Official")
+            self.assertEqual(subs[0]["last_checked_title"], "Phone Review 2026")
+
+            # 4. Simulate failed resolution callback & retry
+            dlg._on_resolution_failed(subs[1]["channel_id"], "网络超时")
+            self.assertEqual(subs[1]["status"], "error")
+
+            dlg._retry_channel(subs[1]["channel_id"])
+            self.assertEqual(subs[1]["status"], "resolving")
+
+            # 5. Duplicate input check - should not add existing
+            dlg.input_field.setText("@mkbhd")
+            dlg._add_channel()
+            self.assertEqual(len(state["media"]["subscriptions"]), 3)
+
+
 if __name__ == "__main__":
     unittest.main()
