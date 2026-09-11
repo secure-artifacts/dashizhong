@@ -249,6 +249,7 @@ class _StyledDialog(QDialog):
         self.setStyleSheet(
             """
             QDialog { background: #07111f; color: #e2e8f0; }
+            QScrollArea, QScrollArea > QWidget, QScrollArea > QWidget > QWidget { background: transparent; }
             QLabel, QCheckBox, QGroupBox { color: #e2e8f0; }
             QGroupBox {
                 border: 1px solid #26445f; border-radius: 10px;
