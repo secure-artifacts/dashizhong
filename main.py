@@ -137,6 +137,9 @@ class ClockAlarmApp(QObject):
         else:
             QTimer.singleShot(200, self.show_world_clock)
 
+        if (self.store.state.get("prefs") or {}).get("check_updates", True):
+            QTimer.singleShot(4000, lambda: self.check_for_updates(interactive=False))
+
     def _cb(self) -> SimpleNamespace:
         return SimpleNamespace(
             save_state=self.store.save_state,
@@ -168,6 +171,11 @@ class ClockAlarmApp(QObject):
             lambda _checked=False: self.show_settings()
         )
         menu.addAction(settings_action)
+        update_action = QAction("检查新版本...", menu)
+        update_action.triggered.connect(
+            lambda _checked=False: self.check_for_updates(interactive=True)
+        )
+        menu.addAction(update_action)
         menu.addSeparator()
         quit_action = QAction("退出", menu)
         quit_action.triggered.connect(self.quit)
@@ -353,10 +361,65 @@ class ClockAlarmApp(QObject):
             )
 
     def _on_tray_message_clicked(self) -> None:
+        if getattr(self, "_pending_update_info", None):
+            info = self._pending_update_info
+            self._pending_update_info = None
+            self.show_update_dialog(info)
+            return
         if getattr(self, "_last_notified_video_url", None):
             self.show_media_player_with_video(self._last_notified_video_url)
         else:
             self.show_media_player2()
+
+    def check_for_updates(self, interactive: bool = False) -> None:
+        from skin import get_app_version
+        from update_checker import UpdateCheckWorker
+
+        current_ver = get_app_version()
+        self._update_worker = UpdateCheckWorker(current_version=current_ver, parent=self)
+
+        def _on_finished(info):
+            if info.has_update:
+                ignored = (self.store.state.get("prefs") or {}).get("ignored_update_version")
+                if interactive or info.latest_version != ignored:
+                    self._pending_update_info = info
+                    if getattr(self, "tray", None):
+                        self.tray.showMessage(
+                            f"发现新版本 Clock/Alarm v{info.latest_version}",
+                            "点击查看更新详情并前往下载新版本",
+                            QSystemTrayIcon.MessageIcon.Information,
+                            10000,
+                        )
+                    if interactive:
+                        self.show_update_dialog(info)
+            elif interactive:
+                QMessageBox.information(
+                    None,
+                    "检查更新",
+                    f"当前已是最新版本 (v{current_ver})，无需更新。",
+                )
+
+        def _on_failed(err):
+            if interactive:
+                QMessageBox.warning(
+                    None,
+                    "检查更新失败",
+                    f"检查更新时发生错误：\n{err}\n\n请检查网络连接后重试。",
+                )
+
+        self._update_worker.check_finished.connect(_on_finished)
+        self._update_worker.check_failed.connect(_on_failed)
+        self._update_worker.start()
+
+    def show_update_dialog(self, info) -> None:
+        from update_dialog import UpdateDialog
+
+        def on_ignore(ver):
+            self.store.state.setdefault("prefs", {})["ignored_update_version"] = ver
+            self.store.save_state()
+
+        dlg = UpdateDialog(info, on_ignore=on_ignore)
+        dlg.exec()
 
     def show_settings(self) -> None:
         from settings_ui import SettingsDialog

@@ -17,6 +17,9 @@ DEFAULT_STATE: dict[str, Any] = {
         "theme": "dark",
         "autostart": False,
         "autostart_consent": False,
+        "check_updates": True,
+        "ignored_update_version": "",
+        "last_update_check": 0.0,
     },
     "todo_board": {"color": "#fef08a"},
     "screenshot": {

@@ -327,6 +327,23 @@ class SettingsDialog(_StyledDialog):
         self.right_click_menu.setChecked(initial_right_click)
         general_layout.addWidget(self.right_click_menu)
 
+        prefs_cfg = state.get("prefs") if isinstance(state.get("prefs"), dict) else {}
+        self.check_updates_auto = QCheckBox("软件启动时自动检查新版本并提醒")
+        self.check_updates_auto.setChecked(bool(prefs_cfg.get("check_updates", True)))
+        general_layout.addWidget(self.check_updates_auto)
+
+        update_row = QHBoxLayout()
+        update_row.setSpacing(10)
+        self.btn_check_update = QPushButton("检查更新")
+        self.btn_check_update.setFixedHeight(30)
+        self.btn_check_update.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_check_update.clicked.connect(self._on_manual_check_update)
+        self.lbl_update_status = QLabel("")
+        self.lbl_update_status.setStyleSheet("color: #94a3b8; font-size: 12px;")
+        update_row.addWidget(self.btn_check_update)
+        update_row.addWidget(self.lbl_update_status, stretch=1)
+        general_layout.addLayout(update_row)
+
         layout.addWidget(general)
 
         cleaner_group = QGroupBox("电脑清理默认范围")
@@ -522,8 +539,47 @@ class SettingsDialog(_StyledDialog):
             self.right_click_menu.isChecked()
         )
 
+        prefs = self.state.setdefault("prefs", {})
+        prefs["check_updates"] = bool(self.check_updates_auto.isChecked())
+
         self.save_state()
         self.accept()
+
+    def _on_manual_check_update(self) -> None:
+        from skin import get_app_version
+        from update_checker import UpdateCheckWorker
+        from update_dialog import UpdateDialog
+
+        self.btn_check_update.setEnabled(False)
+        self.lbl_update_status.setText("正在检查新版本...")
+
+        current_ver = get_app_version()
+        self._update_worker = UpdateCheckWorker(current_version=current_ver, parent=self)
+
+        def _on_finished(info):
+            self.btn_check_update.setEnabled(True)
+            if info.has_update:
+                self.lbl_update_status.setText(f"发现新版本 v{info.latest_version}，建议升级")
+                self.lbl_update_status.setStyleSheet("color: #38bdf8; font-size: 12px; font-weight: bold;")
+                dlg = UpdateDialog(info, on_ignore=self._on_ignore_version, parent=self)
+                dlg.exec()
+            else:
+                self.lbl_update_status.setText(f"当前已是最新版本 (v{info.current_version})")
+                self.lbl_update_status.setStyleSheet("color: #34d399; font-size: 12px; font-weight: 600;")
+
+        def _on_failed(err):
+            self.btn_check_update.setEnabled(True)
+            self.lbl_update_status.setText("检查失败，请检查网络后重试")
+            self.lbl_update_status.setStyleSheet("color: #f87171; font-size: 12px;")
+
+        self._update_worker.check_finished.connect(_on_finished)
+        self._update_worker.check_failed.connect(_on_failed)
+        self._update_worker.start()
+
+    def _on_ignore_version(self, version: str) -> None:
+        prefs = self.state.setdefault("prefs", {})
+        prefs["ignored_update_version"] = version
+        self.save_state()
 
 
 class CleanerDialog(_StyledDialog):
