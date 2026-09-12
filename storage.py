@@ -33,8 +33,9 @@ DEFAULT_STATE: dict[str, Any] = {
     },
     "media": {
         "allow_online": True,
-        "playlist_limit": 100,
+        "playlist_limit": 1000,
         "playlist": [],
+        "favorites": [],
         "right_click_association": False,
         "subscriptions": [],
         "subscription_check_mins": 30,

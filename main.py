@@ -328,7 +328,13 @@ class ClockAlarmApp(QObject):
                 self.media_player_board.add_feed_videos(videos)
             else:
                 playlist = media_cfg.setdefault("playlist", [])
-                max_limit = max(1, min(500, int(media_cfg.get("playlist_limit") or 100)))
+                max_limit = max(1, min(2000, int(media_cfg.get("playlist_limit") or 1000)))
+                fav_urls = set()
+                for f in media_cfg.get("favorites", []):
+                    if isinstance(f, dict) and f.get("url"):
+                        fav_urls.add(f["url"])
+                    elif isinstance(f, (list, tuple)) and len(f) >= 2 and f[1]:
+                        fav_urls.add(f[1])
                 for v in videos:
                     tag = f"[更新 · {v['channel_title']}] {v['title']}"
                     url = v["url"]
@@ -339,7 +345,30 @@ class ClockAlarmApp(QObject):
                     ):
                         playlist.append({"title": tag, "url": url})
                 if len(playlist) > max_limit:
-                    media_cfg["playlist"] = playlist[-max_limit:]
+                    to_remove_count = len(playlist) - max_limit
+                    removed = 0
+                    new_playlist = []
+                    # First pass: trim oldest auto-feed items that are not in favorites
+                    for item in playlist:
+                        u = item.get("url") if isinstance(item, dict) else (item[1] if isinstance(item, (list, tuple)) and len(item) >= 2 else None)
+                        t = item.get("title", "") if isinstance(item, dict) else (item[0] if isinstance(item, (list, tuple)) and len(item) >= 1 else "")
+                        if removed < to_remove_count and u not in fav_urls and t.startswith("[更新 · "):
+                            removed += 1
+                            continue
+                        new_playlist.append(item)
+                    # Second pass if still over limit: trim non-favorite items
+                    if len(new_playlist) > max_limit:
+                        excess = len(new_playlist) - max_limit
+                        rem2 = 0
+                        final_list = []
+                        for item in new_playlist:
+                            u = item.get("url") if isinstance(item, dict) else (item[1] if isinstance(item, (list, tuple)) and len(item) >= 2 else None)
+                            if rem2 < excess and u not in fav_urls:
+                                rem2 += 1
+                                continue
+                            final_list.append(item)
+                        new_playlist = final_list
+                    media_cfg["playlist"] = new_playlist
                 self.store.save_state()
 
         # 2. Tray notification

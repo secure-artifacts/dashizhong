@@ -42,7 +42,7 @@ def get_app_version() -> str:
             except Exception:
                 pass
 
-    _APP_VERSION = "1.0.17"
+    _APP_VERSION = "1.0.18"
     return _APP_VERSION
 
 

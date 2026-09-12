@@ -11,13 +11,15 @@ import tempfile
 import threading
 import uuid
 from pathlib import Path
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject, QRectF, QPointF, QSize, QUrl
-from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer
+import ctypes
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject, QRect, QRectF, QPointF, QSize, QUrl, QEvent
+from PyQt6.QtMultimedia import QAudioOutput, QMediaPlayer, QMediaDevices, QAudioDevice
 from PyQt6.QtMultimediaWidgets import QVideoWidget
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QPlainTextEdit,
+    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QPlainTextEdit,
     QLabel, QFileDialog, QSlider, QListWidget, QListWidgetItem, QMenu, QSizePolicy,
-    QDialog, QLineEdit, QCheckBox, QComboBox, QScrollArea, QFrame, QMessageBox
+    QDialog, QLineEdit, QCheckBox, QComboBox, QScrollArea, QFrame, QMessageBox,
+    QStyledItemDelegate, QStyle
 )
 from PyQt6.QtGui import (
     QKeyEvent, QAction, QIcon, QPixmap, QPainter, QPen, QColor,
@@ -33,6 +35,147 @@ MAX_TITLE_LENGTH = 240
 MAX_QUEUE_ITEMS = 500
 DEFAULT_PLAYLIST_LIMIT = 100
 MAX_COMPAT_CACHE_BYTES = 512 * 1024 * 1024
+
+
+# ─── Chinese Simp/Trad Converter & Search Engine ───────────────────────────
+
+def _get_lc_mapper():
+    try:
+        return ctypes.windll.kernel32.LCMapStringW
+    except Exception:
+        return None
+
+_LCMapStringW = _get_lc_mapper()
+LCMAP_SIMPLIFIED = 0x02000000
+LCMAP_TRADITIONAL = 0x04000000
+
+
+def to_simplified(text: str) -> str:
+    if not text or not _LCMapStringW:
+        return text
+    try:
+        buf = ctypes.create_unicode_buffer(len(text) + 2)
+        ret = _LCMapStringW(0x0804, LCMAP_SIMPLIFIED, text, len(text), buf, len(buf))
+        if ret > 0:
+            return buf.value[:ret]
+    except Exception:
+        pass
+    return text
+
+
+def to_traditional(text: str) -> str:
+    if not text or not _LCMapStringW:
+        return text
+    try:
+        buf = ctypes.create_unicode_buffer(len(text) + 2)
+        ret = _LCMapStringW(0x0804, LCMAP_TRADITIONAL, text, len(text), buf, len(buf))
+        if ret > 0:
+            return buf.value[:ret]
+    except Exception:
+        pass
+    return text
+
+
+def matches_search(query: str, target: str) -> bool:
+    clean_q = str(query or "").strip().lower()
+    if not clean_q:
+        return True
+    clean_t = str(target or "").lower()
+    words = clean_q.split()
+    simp_t = to_simplified(clean_t)
+    trad_t = to_traditional(clean_t)
+    for word in words:
+        simp_w = to_simplified(word)
+        trad_w = to_traditional(word)
+        if not (word in clean_t or simp_w in simp_t or trad_w in trad_t):
+            return False
+    return True
+
+
+def _get_persistent_cache_dir() -> Path:
+    base = os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()
+    p = Path(base) / "ClockAlarm" / "MediaCache"
+    try:
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+    except Exception:
+        return Path(tempfile.gettempdir())
+
+
+# ─── Custom Playlist Delegate & Widget ─────────────────────────────────────
+
+class PlaylistItemDelegate(QStyledItemDelegate):
+    def sizeHint(self, option, index):
+        s = super().sizeHint(option, index)
+        return QSize(max(s.width(), 220), max(s.height(), 40))
+
+    def paint(self, painter, option, index):
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        # Background state
+        if option.state & QStyle.StateFlag.State_Selected:
+            painter.fillRect(option.rect, QColor("#0c4a6e"))
+            painter.fillRect(QRect(option.rect.left(), option.rect.top(), 3, option.rect.height()), QColor("#38bdf8"))
+        elif option.state & QStyle.StateFlag.State_MouseOver:
+            painter.fillRect(option.rect, QColor("#1e293b"))
+
+        # Text and status
+        text = index.data(Qt.ItemDataRole.DisplayRole) or ""
+        is_fav = bool(index.data(Qt.ItemDataRole.UserRole + 1))
+        is_current = bool(index.data(Qt.ItemDataRole.UserRole + 2))
+
+        text_rect = QRect(
+            option.rect.left() + 8,
+            option.rect.top() + 4,
+            max(20, option.rect.width() - 42),
+            option.rect.height() - 8
+        )
+        if is_current:
+            painter.setPen(QColor("#38bdf8"))
+            f = painter.font()
+            f.setBold(True)
+            painter.setFont(f)
+        elif option.state & QStyle.StateFlag.State_Selected:
+            painter.setPen(QColor("#ffffff"))
+        else:
+            painter.setPen(QColor("#e2e8f0"))
+
+        painter.drawText(text_rect, Qt.TextFlag.TextWordWrap | Qt.AlignmentFlag.AlignVCenter, text)
+
+        # Star
+        star_rect = QRect(
+            option.rect.right() - 30,
+            option.rect.top() + (option.rect.height() - 24) // 2,
+            24, 24
+        )
+        f = painter.font()
+        f.setPointSize(13)
+        painter.setFont(f)
+        if is_fav:
+            painter.setPen(QColor("#fbbf24"))
+            painter.drawText(star_rect, Qt.AlignmentFlag.AlignCenter, "★")
+        else:
+            painter.setPen(QColor("#64748b"))
+            painter.drawText(star_rect, Qt.AlignmentFlag.AlignCenter, "☆")
+
+        painter.restore()
+
+
+class PlayListWidget(QListWidget):
+    star_clicked = pyqtSignal(int)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            pos = event.position().toPoint()
+            item = self.itemAt(pos)
+            if item:
+                rect = self.visualItemRect(item)
+                if pos.x() >= rect.right() - 34:
+                    self.star_clicked.emit(self.row(item))
+                    return
+        super().mousePressEvent(event)
+
 
 
 # ─── Icon Factory ──────────────────────────────────────────────────────────
@@ -387,20 +530,58 @@ class YtDlpStreamWorker(QObject):
                 return str(cached)
             root.mkdir(parents=True, exist_ok=True)
 
+            formats = {'.mp4', '.mkv', '.webm', '.mov', '.avi', '.m4a', '.mp3', '.ogg', '.opus', '.wav', '.flac'}
+            existing = [p for p in root.glob(f'{stem}.*')
+                        if p.stem == stem and p.suffix.lower() in formats
+                        and p.is_file() and p.stat().st_size > 0]
+            if existing:
+                playable = max(existing, key=lambda p: p.stat().st_mtime_ns)
+                self._completed[key] = playable
+                return str(playable)
+
+            persistent_root = None
+            try:
+                persistent_root = _get_persistent_cache_dir()
+                existing_pers = [p for p in persistent_root.glob(f'{stem}.*')
+                                 if p.stem == stem and p.suffix.lower() in formats
+                                 and p.is_file() and p.stat().st_size > 0]
+                if existing_pers:
+                    playable = max(existing_pers, key=lambda p: p.stat().st_mtime_ns)
+                    self._completed[key] = playable
+                    return str(playable)
+            except (NameError, Exception):
+                persistent_root = None
+
             def progress(_status):
                 if cancel_event.is_set():
                     raise yt_dlp.utils.DownloadCancelled()
 
             limit = target_height if target_height > 0 else 1080
+            # Prefer fast progressive stream (no ffmpeg remux required), then fallback to split streams
+            format_spec = (
+                f'best[ext=mp4][height<={limit}]/'
+                f'bestvideo[height<={limit}]+bestaudio/'
+                f'best[height<={limit}]/best'
+            )
             ydl_opts = {
                 'extractor_args': {'youtube': {'player_client': ['android', 'web']}},
-                'format': f'bestvideo[height<={limit}]+bestaudio/best[height<={limit}]/best',
+                'format': format_spec,
                 'quiet': True, 'no_warnings': True, 'noprogress': True,
-                'socket_timeout': 15, 'noplaylist': True,
+                'socket_timeout': 10, 'noplaylist': True,
                 'max_filesize': MAX_COMPAT_CACHE_BYTES,
                 'outtmpl': str(root / f'{stem}.%(ext)s'),
                 'nopart': False, 'progress_hooks': [progress],
+                'concurrent_fragment_downloads': 4,
             }
+            proxy = None
+            try:
+                from yt_feed_monitor import detect_local_proxy
+                proxy = detect_local_proxy()
+            except Exception:
+                pass
+            if proxy:
+                ydl_opts['proxy'] = proxy
+
             try:
                 import imageio_ffmpeg
                 ydl_opts['ffmpeg_location'] = imageio_ffmpeg.get_ffmpeg_exe()
@@ -411,7 +592,6 @@ class YtDlpStreamWorker(QObject):
             if cancel_event.is_set():
                 return None
             # Never promote .part, metadata or unmerged .fNNN tracks to playback.
-            formats = {'.mp4', '.mkv', '.webm', '.mov', '.avi', '.m4a', '.mp3', '.ogg', '.opus', '.wav', '.flac'}
             files = [p for p in root.glob(f'{stem}.*')
                      if p.stem == stem and p.suffix.lower() in formats
                      and p.is_file() and p.stat().st_size > 0]
@@ -419,6 +599,13 @@ class YtDlpStreamWorker(QObject):
                 raise RuntimeError("下载未生成完整的播放文件，请重试。")
             playable = max(files, key=lambda p: p.stat().st_mtime_ns)
             self._completed[key] = playable
+            if persistent_root is not None:
+                try:
+                    dest = persistent_root / playable.name
+                    if not dest.exists() and persistent_root.is_dir():
+                        shutil.copy2(playable, dest)
+                except Exception:
+                    pass
             return str(playable)
         finally:
             self._download_lock.release()
@@ -1135,6 +1322,10 @@ class MediaPlayerWindow(QWidget):
         self.player.playbackStateChanged.connect(self._on_playback_state_changed)
         self.player.errorOccurred.connect(self._on_media_error)
 
+        # 🎧 Audio endpoint hot-plug / device change listener
+        self._media_devices = QMediaDevices(self)
+        self._media_devices.audioOutputsChanged.connect(self._on_audio_outputs_changed)
+
         # ── Bottom Controls Bar (Crystal Clear, Fully Visible) ──
         self.controls_widget = QWidget(self.player_widget)
         self.controls_widget.setStyleSheet("""
@@ -1201,7 +1392,9 @@ class MediaPlayerWindow(QWidget):
         self.vol_btn.setIcon(self._speaker_icon)
         self.vol_btn.setIconSize(QSize(20, 20))
         self.vol_btn.setFixedSize(30, 30)
-        self.vol_btn.setToolTip("音量")
+        self.vol_btn.setToolTip("音量 (右键选择输出设备)")
+        self.vol_btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.vol_btn.customContextMenuRequested.connect(self._show_audio_devices_menu)
 
         self.vol_slider = QSlider(Qt.Orientation.Horizontal)
         self.vol_slider.setRange(0, 100)
@@ -1336,7 +1529,42 @@ class MediaPlayerWindow(QWidget):
         top_row.addWidget(self.open_file_btn)
         qlayout.addLayout(top_row)
 
-        # Playback Mode Buttons
+        # Segmented Tabs: 📋 播放列表 vs ⭐ 我的最爱
+        tabs_row = QHBoxLayout()
+        tabs_row.setSpacing(4)
+
+        tab_btn_style = """
+            QPushButton {
+                background: #1e293b; color: #94a3b8; border: 1px solid #334155;
+                border-radius: 6px; padding: 5px 6px; font-weight: 600; font-size: 11px;
+            }
+            QPushButton:checked {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #0284c7, stop:1 #0369a1);
+                color: #ffffff; border-color: #38bdf8;
+            }
+            QPushButton:hover:!checked {
+                background: #334155; color: #f1f5f9;
+            }
+        """
+        self.tab_playlist_btn = QPushButton("📋 播放列表")
+        self.tab_playlist_btn.setCheckable(True)
+        self.tab_playlist_btn.setChecked(True)
+        self.tab_playlist_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.tab_playlist_btn.setStyleSheet(tab_btn_style)
+        self.tab_playlist_btn.clicked.connect(lambda: self._set_active_tab("playlist"))
+        tabs_row.addWidget(self.tab_playlist_btn, stretch=1)
+
+        self.tab_favorites_btn = QPushButton("⭐ 我的最爱 (0)")
+        self.tab_favorites_btn.setCheckable(True)
+        self.tab_favorites_btn.setChecked(False)
+        self.tab_favorites_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.tab_favorites_btn.setStyleSheet(tab_btn_style)
+        self.tab_favorites_btn.clicked.connect(lambda: self._set_active_tab("favorites"))
+        tabs_row.addWidget(self.tab_favorites_btn, stretch=1)
+
+        qlayout.addLayout(tabs_row)
+
+        # Playback Mode Buttons (Unified across all lists)
         mode_layout = QHBoxLayout()
         mode_layout.setSpacing(6)
 
@@ -1344,19 +1572,19 @@ class MediaPlayerWindow(QWidget):
         self.seq_play_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.seq_play_btn.setIcon(_make_dual_icon(_draw_repeat, 18))
         self.seq_play_btn.setIconSize(QSize(18, 18))
-        self.seq_play_btn.setToolTip("顺序播放")
+        self.seq_play_btn.setToolTip("顺序播放 (对双列表均生效)")
 
         self.single_loop_btn = QPushButton()
         self.single_loop_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.single_loop_btn.setIcon(_make_dual_icon(_draw_repeat_one, 18))
         self.single_loop_btn.setIconSize(QSize(18, 18))
-        self.single_loop_btn.setToolTip("单曲循环")
+        self.single_loop_btn.setToolTip("单曲循环 (对双列表均生效)")
 
         self.random_play_btn = QPushButton()
         self.random_play_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.random_play_btn.setIcon(_make_dual_icon(_draw_shuffle, 18))
         self.random_play_btn.setIconSize(QSize(18, 18))
-        self.random_play_btn.setToolTip("随机播放")
+        self.random_play_btn.setToolTip("随机播放 (对双列表均生效)")
 
         mode_btn_style = """
             QPushButton {
@@ -1387,12 +1615,34 @@ class MediaPlayerWindow(QWidget):
         )
         self.set_play_mode(self.play_mode)
 
-        # Queue list (Horizontal scroll disabled, text wrapped)
-        self.queue_list = QListWidget()
+        # Search Bar (Chinese Simp/Trad + English)
+        search_row = QHBoxLayout()
+        search_row.setSpacing(4)
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("🔍 搜索歌曲 / 视频 (中英简繁)...")
+        self.search_input.setClearButtonEnabled(True)
+        self.search_input.setStyleSheet("""
+            QLineEdit {
+                background: #0f172a; border: 1px solid #334155; border-radius: 6px;
+                padding: 5px 8px; color: #f8fafc; font-size: 12px;
+            }
+            QLineEdit:focus {
+                border: 1px solid #38bdf8; background: #131f37;
+            }
+        """)
+        self.search_input.textChanged.connect(self._on_search_text_changed)
+        self.search_input.installEventFilter(self)
+        search_row.addWidget(self.search_input)
+        qlayout.addLayout(search_row)
+
+        # Queue list (Horizontal scroll disabled, text wrapped, custom star delegate)
+        self.queue_list = PlayListWidget()
+        self.queue_list.setItemDelegate(PlaylistItemDelegate(self.queue_list))
         self.queue_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.queue_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.queue_list.setWordWrap(True)
         self.queue_list.itemDoubleClicked.connect(self._on_queue_double_click)
+        self.queue_list.star_clicked.connect(self._on_star_clicked)
         self.queue_list.setCursor(Qt.CursorShape.PointingHandCursor)
         self.queue_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.queue_list.customContextMenuRequested.connect(self._queue_context_menu)
@@ -1425,7 +1675,7 @@ class MediaPlayerWindow(QWidget):
         self.clear_queue_btn.setFixedHeight(32)
         self.clear_queue_btn.setStyleSheet("background:#1e293b; border:1px solid #334155; border-radius:6px;")
         self.clear_queue_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.clear_queue_btn.setToolTip("清空播放列表")
+        self.clear_queue_btn.setToolTip("清空当前列表")
         self.clear_queue_btn.clicked.connect(lambda *a: self.clear_queue())
 
         btn_layout.addWidget(self.add_queue_btn, stretch=3)
@@ -1453,8 +1703,13 @@ class MediaPlayerWindow(QWidget):
         self.stream_worker.media_status.connect(self._on_media_status)
         self.stream_worker.error.connect(self._on_stream_error)
 
-        # Playback state
+        # Playback & collection state
         self.playlist = []
+        self.favorites = []
+        self.favorite_urls = set()
+        self.active_tab = "playlist"
+        self.playback_source = "playlist"
+        self.search_query = ""
         self.current_index = -1
         self.is_playing_state = False
         self.is_fullscreen = False
@@ -1469,10 +1724,14 @@ class MediaPlayerWindow(QWidget):
     # ── Highlighting & Auto Scrolling ──
 
     def _scroll_to_current_playlist_item(self):
-        if 0 <= self.current_index < self.queue_list.count():
-            item = self.queue_list.item(self.current_index)
-            self.queue_list.setCurrentItem(item)
-            self.queue_list.scrollToItem(item, QListWidget.ScrollHint.PositionAtCenter)
+        if self.playback_source != self.active_tab:
+            return
+        for i in range(self.queue_list.count()):
+            item = self.queue_list.item(i)
+            if item and item.data(Qt.ItemDataRole.UserRole) == self.current_index:
+                self.queue_list.setCurrentItem(item)
+                self.queue_list.scrollToItem(item, QListWidget.ScrollHint.PositionAtCenter)
+                break
 
     # ── Player Events ──
 
@@ -1548,11 +1807,12 @@ class MediaPlayerWindow(QWidget):
 
     def _select_quality(self, height: int):
         self._selected_quality_height = height
-        if self.current_index < 0:
+        pool = self._get_active_playback_list()
+        if self.current_index < 0 or self.current_index >= len(pool):
             return
 
         current_pos = self.player.position() if self.player else 0
-        title, url = self.playlist[self.current_index]
+        title, url = pool[self.current_index]
         if url.startswith("http"):
             self._current_request_id += 1
             req_id = self._current_request_id
@@ -1563,15 +1823,16 @@ class MediaPlayerWindow(QWidget):
     # ── Pre-fetching Next Video ──
 
     def _trigger_next_prefetch(self):
-        if len(self.playlist) <= 1:
+        pool = self._get_active_playback_list()
+        if len(pool) <= 1:
             return
         nxt = self.current_index + 1
-        if nxt >= len(self.playlist):
+        if nxt >= len(pool):
             if self.play_mode == "sequence":
                 nxt = 0
             else:
                 return
-        _title, next_url = self.playlist[nxt]
+        _title, next_url = pool[nxt]
         if next_url.startswith("http"):
             self.stream_worker.prefetch(next_url, self._selected_quality_height, self._media_cache_dir)
 
@@ -1629,8 +1890,93 @@ class MediaPlayerWindow(QWidget):
             self.audio_output.setVolume(max(0.0, min(1.0, value / 100.0)))
         self.vol_btn.setIcon(self._muted_icon if value == 0 else self._speaker_icon)
 
+    def eventFilter(self, obj, event):
+        if obj == getattr(self, "search_input", None):
+            if event.type() == QEvent.Type.KeyPress and event.key() == Qt.Key.Key_Escape:
+                self.search_input.clear()
+                self.search_input.clearFocus()
+                return True
+        return super().eventFilter(obj, event)
+
+    # ── Audio Device Hot-Switching ──
+
+    def _on_audio_outputs_changed(self):
+        self._rebind_audio_output()
+
+    def _rebind_audio_output(self):
+        try:
+            default_dev = QMediaDevices.defaultAudioOutput()
+            if not default_dev.isNull():
+                cur_vol = self.audio_output.volume() if self.audio_output else (self.vol_slider.value() / 100.0)
+                cur_muted = self.audio_output.isMuted() if self.audio_output else (self.vol_slider.value() == 0)
+                new_output = QAudioOutput(default_dev, self)
+                new_output.setVolume(cur_vol)
+                new_output.setMuted(cur_muted)
+                old_output = self.audio_output
+                self.player.setAudioOutput(new_output)
+                self.audio_output = new_output
+                if old_output:
+                    old_output.deleteLater()
+        except Exception:
+            pass
+
+    def _show_audio_devices_menu(self, pos):
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #0f172a; border: 1px solid #1e293b;
+                border-radius: 8px; padding: 6px; color: #f8fafc;
+            }
+            QMenu::item {
+                padding: 6px 22px 6px 16px; border-radius: 6px; font-size: 12px;
+            }
+            QMenu::item:selected {
+                background-color: #0284c7; color: #ffffff;
+            }
+        """)
+
+        title_action = QAction("🎧 选择音频输出设备", menu)
+        title_action.setEnabled(False)
+        menu.addAction(title_action)
+        menu.addSeparator()
+
+        current_dev = self.audio_output.device() if self.audio_output else None
+        current_id = current_dev.id() if current_dev else None
+
+        for dev in QMediaDevices.audioOutputs():
+            desc = dev.description()
+            if dev.isDefault():
+                desc += " (系统默认)"
+            action = QAction(desc, menu)
+            action.setCheckable(True)
+            action.setChecked(dev.id() == current_id)
+            action.triggered.connect(lambda checked=False, d=dev: self._switch_audio_device(d))
+            menu.addAction(action)
+
+        menu.exec(self.vol_btn.mapToGlobal(pos))
+
+    def _switch_audio_device(self, device: QAudioDevice):
+        try:
+            cur_vol = self.audio_output.volume() if self.audio_output else (self.vol_slider.value() / 100.0)
+            cur_muted = self.audio_output.isMuted() if self.audio_output else (self.vol_slider.value() == 0)
+            new_output = QAudioOutput(device, self)
+            new_output.setVolume(cur_vol)
+            new_output.setMuted(cur_muted)
+            old_output = self.audio_output
+            self.player.setAudioOutput(new_output)
+            self.audio_output = new_output
+            if old_output:
+                old_output.deleteLater()
+            self.status_label.setText(f"已切换声道: {device.description()[:25]}")
+        except Exception:
+            pass
+
+    # ── Playback Controls ──
+
     def toggle_play(self):
-        if self.playlist and self.current_index == -1:
+        self._rebind_audio_output()
+        pool = self._get_active_playback_list()
+        if pool and self.current_index == -1:
             self.play_next()
             return
         if self.is_playing_state:
@@ -1641,6 +1987,7 @@ class MediaPlayerWindow(QWidget):
     def play(self):
         if not self._ensure_vlc():
             return
+        self._rebind_audio_output()
         self.player.play()
         self.is_playing_state = True
         self.play_btn.setIcon(self._pause_icon)
@@ -1688,10 +2035,32 @@ class MediaPlayerWindow(QWidget):
             if any(u == url for _, u in self.playlist):
                 continue
             self.playlist.append((title, url))
-            self.queue_list.addItem(title)
             added += 1
         if added:
+            media_cfg = (self.state or {}).get("media", {})
+            max_limit = max(1, min(2000, int(media_cfg.get("playlist_limit") or 1000)))
+            if len(self.playlist) > max_limit:
+                to_remove_count = len(self.playlist) - max_limit
+                removed = 0
+                new_playlist = []
+                for t, u in self.playlist:
+                    if removed < to_remove_count and u not in self.favorite_urls and t.startswith("[更新 · "):
+                        removed += 1
+                        continue
+                    new_playlist.append((t, u))
+                if len(new_playlist) > max_limit:
+                    excess = len(new_playlist) - max_limit
+                    rem2 = 0
+                    final_list = []
+                    for t, u in new_playlist:
+                        if rem2 < excess and u not in self.favorite_urls:
+                            rem2 += 1
+                            continue
+                        final_list.append((t, u))
+                    new_playlist = final_list
+                self.playlist = new_playlist
             self._persist_playlist()
+            self._populate_list_view()
             self.status_label.setText(f"已收录 {added} 个订阅新视频")
 
     # ── File & Queue ──
@@ -1723,13 +2092,37 @@ class MediaPlayerWindow(QWidget):
                 continue
             restored.append((title, url))
 
+        self.playlist.clear()
         self.playlist.extend(restored)
-        for title, _url in restored:
-            self.queue_list.addItem(title)
+
+        # Restore favorites
+        saved_favs = media_cfg.get("favorites")
+        self.favorites = []
+        self.favorite_urls = set()
+        if isinstance(saved_favs, list):
+            for entry in saved_favs[:MAX_QUEUE_ITEMS]:
+                if isinstance(entry, dict):
+                    title, url = entry.get("title", ""), entry.get("url", "")
+                elif isinstance(entry, (list, tuple)) and len(entry) >= 2:
+                    title, url = entry[0], entry[1]
+                else:
+                    continue
+                if url:
+                    self.favorites.append((str(title)[:MAX_TITLE_LENGTH] or "Unknown", str(url)))
+                    self.favorite_urls.add(str(url))
+        elif saved_favs is None:
+            # First time running new version: auto-seed existing non-update items into favorites!
+            for title, url in self.playlist:
+                if not title.startswith("[更新 · "):
+                    self.favorites.append((title, url))
+                    self.favorite_urls.add(url)
+            media_cfg["favorites"] = [{"title": t, "url": u} for t, u in self.favorites]
+            self._persist_favorites()
 
         media_cfg["playlist"] = [
             {"title": title, "url": url} for title, url in self.playlist
         ]
+        self._populate_list_view()
 
     def _persist_playlist(self, *, immediate=False):
         self.state.setdefault("media", {})["playlist"] = [
@@ -1744,12 +2137,96 @@ class MediaPlayerWindow(QWidget):
         else:
             self._playlist_save_timer.start()
 
+    def _persist_favorites(self):
+        self.state.setdefault("media", {})["favorites"] = [
+            {"title": str(t)[:MAX_TITLE_LENGTH], "url": str(u)[:MAX_URL_LENGTH]}
+            for t, u in self.favorites[:MAX_QUEUE_ITEMS]
+        ]
+        if self.save_state:
+            try:
+                self.save_state()
+            except Exception:
+                pass
+
     def _flush_playlist_state(self):
         if self.save_state:
             try:
                 self.save_state()
             except Exception:
                 pass
+
+    def _set_active_tab(self, tab_name: str):
+        self.active_tab = tab_name
+        if self.current_index == -1:
+            self.playback_source = tab_name
+        self.tab_playlist_btn.setChecked(tab_name == "playlist")
+        self.tab_favorites_btn.setChecked(tab_name == "favorites")
+        self._populate_list_view()
+
+    def _on_search_text_changed(self, text: str):
+        self.search_query = text
+        self._populate_list_view()
+
+    def is_favorite(self, url: str) -> bool:
+        return url in self.favorite_urls
+
+    def _on_star_clicked(self, row: int):
+        item = self.queue_list.item(row)
+        if not item:
+            return
+        orig_idx = item.data(Qt.ItemDataRole.UserRole)
+        pool = self.favorites if self.active_tab == "favorites" else self.playlist
+        if orig_idx is None or orig_idx < 0 or orig_idx >= len(pool):
+            return
+        title, url = pool[orig_idx]
+        self.toggle_favorite(title, url)
+
+    def toggle_favorite(self, title: str, url: str):
+        if not url:
+            return
+        if url in self.favorite_urls:
+            self.favorites = [(t, u) for (t, u) in self.favorites if u != url]
+            self.favorite_urls.discard(url)
+            self.status_label.setText(f"已移出我的最爱: {title[:20]}")
+        else:
+            self.favorites.append((title, url))
+            self.favorite_urls.add(url)
+            self.status_label.setText(f"⭐ 已加入我的最爱: {title[:20]}")
+        self._persist_favorites()
+        self._populate_list_view()
+
+    def _get_active_playback_list(self) -> list[tuple[str, str]]:
+        if self.playback_source == "favorites":
+            return self.favorites
+        return self.playlist
+
+    def _populate_list_view(self):
+        self.queue_list.clear()
+
+        # Update tab counts
+        fav_count = len(self.favorites)
+        self.tab_favorites_btn.setText(f"⭐ 我的最爱 ({fav_count})")
+        self.tab_playlist_btn.setText("📋 播放列表")
+
+        source_list = self.favorites if self.active_tab == "favorites" else self.playlist
+        search_str = self.search_query.strip()
+
+        for orig_idx, (title, url) in enumerate(source_list):
+            if search_str and not matches_search(search_str, title):
+                continue
+            item = QListWidgetItem(title)
+            item.setData(Qt.ItemDataRole.UserRole, orig_idx)
+            is_fav = url in self.favorite_urls
+            item.setData(Qt.ItemDataRole.UserRole + 1, is_fav)
+            is_curr = (self.playback_source == self.active_tab and self.current_index == orig_idx)
+            item.setData(Qt.ItemDataRole.UserRole + 2, is_curr)
+            if is_fav:
+                item.setToolTip(f"{title}\n⭐ 已在我的最爱 (点击右侧五角星移出)")
+            else:
+                item.setToolTip(f"{title}\n☆ 点击右侧五角星加入我的最爱")
+            self.queue_list.addItem(item)
+
+        self._scroll_to_current_playlist_item()
 
     def open_file(self):
         media_cfg = self.state.setdefault("media", {})
@@ -1769,8 +2246,8 @@ class MediaPlayerWindow(QWidget):
             for f in filenames[:remaining]:
                 title = os.path.basename(f)
                 self.playlist.append((title, f))
-                self.queue_list.addItem(title)
             self._persist_playlist()
+            self._populate_list_view()
             if self.current_index == -1 and self.playlist:
                 self.status_label.setText(f"已导入 {min(len(filenames), remaining)} 个本地文件")
                 QTimer.singleShot(0, self.play_next)
@@ -1799,7 +2276,7 @@ class MediaPlayerWindow(QWidget):
         if remaining <= 0:
             return
         configured_limit = max(
-            1, min(200, int(media_cfg.get("playlist_limit") or DEFAULT_PLAYLIST_LIMIT))
+            1, min(1000, int(media_cfg.get("playlist_limit") or 1000))
         )
         extract_limit = min(configured_limit, remaining)
         self.url_input.clear()
@@ -1812,11 +2289,16 @@ class MediaPlayerWindow(QWidget):
         self.extractor.cancel()
         self.stream_worker.cancel()
         self.set_buttons_enabled(True)
-        self.playlist.clear()
-        self.queue_list.clear()
+        if self.active_tab == "favorites":
+            self.favorites.clear()
+            self.favorite_urls.clear()
+            self._persist_favorites()
+        else:
+            self.playlist.clear()
+            self._persist_playlist()
         self.current_index = -1
         self.stop()
-        self._persist_playlist()
+        self._populate_list_view()
 
     def _on_item_extracted(self, title, url):
         if len(self.playlist) >= MAX_QUEUE_ITEMS:
@@ -1828,8 +2310,8 @@ class MediaPlayerWindow(QWidget):
         if not url or len(url) > MAX_URL_LENGTH:
             return
         self.playlist.append((title, url))
-        self.queue_list.addItem(title)
         self._persist_playlist()
+        self._populate_list_view()
 
     def _on_extract_finished(self):
         self.set_buttons_enabled(True)
@@ -1848,47 +2330,107 @@ class MediaPlayerWindow(QWidget):
         self.status_label.setText(f"Error: {err}")
 
     def _on_queue_double_click(self, item):
-        idx = self.queue_list.row(item)
-        self.play_index(idx)
+        orig_idx = item.data(Qt.ItemDataRole.UserRole)
+        if orig_idx is not None:
+            self.playback_source = self.active_tab
+            self.play_index(orig_idx)
+        else:
+            self.playback_source = self.active_tab
+            self.play_index(self.queue_list.row(item))
 
     def _queue_context_menu(self, pos):
         item = self.queue_list.itemAt(pos)
         if item is None:
             return
+        orig_idx = item.data(Qt.ItemDataRole.UserRole)
+        pool = self.favorites if self.active_tab == "favorites" else self.playlist
+        if orig_idx is None or orig_idx >= len(pool):
+            orig_idx = self.queue_list.row(item)
+            if orig_idx >= len(pool):
+                return
+        title, url = pool[orig_idx]
+        is_fav = url in self.favorite_urls
+
         menu = QMenu(self)
-        idx = self.queue_list.row(item)
-        remove_action = QAction("移除此项", menu)
-        remove_action.triggered.connect(lambda *a, i=idx: self._remove_item(i))
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #0f172a; border: 1px solid #1e293b;
+                border-radius: 8px; padding: 6px; color: #f8fafc;
+            }
+            QMenu::item {
+                padding: 6px 22px 6px 16px; border-radius: 6px; font-size: 12px;
+            }
+            QMenu::item:selected {
+                background-color: #0284c7; color: #ffffff;
+            }
+        """)
+
+        play_action = QAction("▶ 播放此项", menu)
+        play_action.triggered.connect(lambda: (setattr(self, "playback_source", self.active_tab), self.play_index(orig_idx)))
+        menu.addAction(play_action)
+
+        if is_fav:
+            fav_action = QAction("☆ 从我的最爱中移除", menu)
+        else:
+            fav_action = QAction("⭐ 添加到我的最爱", menu)
+        fav_action.triggered.connect(lambda: self.toggle_favorite(title, url))
+        menu.addAction(fav_action)
+
+        menu.addSeparator()
+
+        copy_action = QAction("📋 复制链接", menu)
+        copy_action.triggered.connect(lambda: QApplication.clipboard().setText(url))
+        menu.addAction(copy_action)
+
+        remove_action = QAction("✕ 移除此项", menu)
+        remove_action.triggered.connect(lambda: self._remove_item(orig_idx))
         menu.addAction(remove_action)
+
         menu.exec(self.queue_list.mapToGlobal(pos))
 
-    def _remove_item(self, idx):
-        if 0 <= idx < len(self.playlist):
-            self.playlist.pop(idx)
-            self.queue_list.takeItem(idx)
-            if idx == self.current_index:
-                self.stop()
-                self.current_index = -1
-            elif idx < self.current_index:
-                self.current_index -= 1
-            self._persist_playlist()
+    def _remove_item(self, idx: int):
+        pool = self.favorites if self.active_tab == "favorites" else self.playlist
+        if 0 <= idx < len(pool):
+            title, url = pool.pop(idx)
+            if self.active_tab == "favorites":
+                self.favorite_urls.discard(url)
+                self._persist_favorites()
+            else:
+                self._persist_playlist()
+            if self.playback_source == self.active_tab:
+                if idx == self.current_index:
+                    self.stop()
+                    self.current_index = -1
+                elif idx < self.current_index:
+                    self.current_index -= 1
+            self._populate_list_view()
 
     # ── Playback ──
 
     def play_prev(self):
-        if self.current_index > 0:
-            self.play_index(self.current_index - 1)
+        pool = self._get_active_playback_list() if hasattr(self, "_get_active_playback_list") else getattr(self, "playlist", [])
+        if not pool:
+            return
+        if self.play_mode == "random":
+            self.play_next()
+        else:
+            prev_idx = self.current_index - 1
+            self.play_index(prev_idx if prev_idx >= 0 else len(pool) - 1)
 
     def play_next(self):
-        if not self.playlist:
+        pool = self._get_active_playback_list() if hasattr(self, "_get_active_playback_list") else getattr(self, "playlist", [])
+        if not pool:
             return
         if self.play_mode == "single_loop":
             self.play_index(max(0, self.current_index))
         elif self.play_mode == "random":
-            self.play_index(random.randint(0, len(self.playlist) - 1))
+            if len(pool) <= 1:
+                self.play_index(0)
+            else:
+                self.play_index(random.randint(0, len(pool) - 1))
         else:
             nxt = self.current_index + 1
-            self.play_index(nxt if nxt < len(self.playlist) else 0)
+            self.play_index(nxt if nxt < len(pool) else 0)
 
     def set_play_mode(self, mode: str):
         self.play_mode = mode
@@ -1900,10 +2442,11 @@ class MediaPlayerWindow(QWidget):
             self._persist_playlist()
 
     def play_index(self, index: int):
-        if index < 0 or index >= len(self.playlist):
+        pool = self._get_active_playback_list() if hasattr(self, "_get_active_playback_list") else getattr(self, "playlist", [])
+        if index < 0 or index >= len(pool):
             return
         self.current_index = index
-        self._scroll_to_current_playlist_item()
+        self._populate_list_view()
 
         self._current_request_id += 1
         req_id = self._current_request_id
@@ -1912,7 +2455,7 @@ class MediaPlayerWindow(QWidget):
         self._media_retry_pending = False
         self._pending_seek_pos = 0
 
-        title, url = self.playlist[index]
+        title, url = pool[index]
         if url.startswith("http"):
             self._online_source_url = url
             self.stream_worker.load_media(req_id, url, self._selected_quality_height, self._media_cache_dir)
@@ -1927,7 +2470,8 @@ class MediaPlayerWindow(QWidget):
         if req_id != self._current_request_id or self.current_index < 0:
             return
         self._media_retry_pending = False
-        title = self.playlist[self.current_index][0]
+        pool = self._get_active_playback_list()
+        title = pool[self.current_index][0] if 0 <= self.current_index < len(pool) else ""
         q_label = f" [{height}p]" if height > 0 else ""
         self.status_label.setText(f"{title}{q_label}")
         seek_pos = getattr(self, "_pending_seek_pos", 0)
@@ -1955,10 +2499,11 @@ class MediaPlayerWindow(QWidget):
         if req_id != self._current_request_id:
             return
         self._media_retry_pending = False
-        if len(self.playlist) <= 1:
+        pool = self._get_active_playback_list()
+        if len(pool) <= 1:
             self.status_label.setText("播放失败：列表中没有其他可播放项目")
             return
-        nxt = (max(self.current_index, 0) + 1) % len(self.playlist)
+        nxt = (max(self.current_index, 0) + 1) % len(pool)
         self.play_index(nxt)
 
     def _play_stream(self, req_id: int, title: str, uri: str, seek_pos_ms: int = 0):
