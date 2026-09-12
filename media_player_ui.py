@@ -1922,17 +1922,9 @@ class MediaPlayerWindow(QWidget):
     def _rebind_audio_output(self):
         try:
             default_dev = QMediaDevices.defaultAudioOutput()
-            if not default_dev.isNull():
-                cur_vol = self.audio_output.volume() if self.audio_output else (self.vol_slider.value() / 100.0)
-                cur_muted = self.audio_output.isMuted() if self.audio_output else (self.vol_slider.value() == 0)
-                new_output = QAudioOutput(default_dev, self)
-                new_output.setVolume(cur_vol)
-                new_output.setMuted(cur_muted)
-                old_output = self.audio_output
-                self.player.setAudioOutput(new_output)
-                self.audio_output = new_output
-                if old_output:
-                    old_output.deleteLater()
+            if not default_dev.isNull() and hasattr(self, "audio_output") and self.audio_output:
+                if self.audio_output.device().id() != default_dev.id():
+                    self.audio_output.setDevice(default_dev)
         except Exception:
             pass
 
@@ -1973,25 +1965,16 @@ class MediaPlayerWindow(QWidget):
 
     def _switch_audio_device(self, device: QAudioDevice):
         try:
-            cur_vol = self.audio_output.volume() if self.audio_output else (self.vol_slider.value() / 100.0)
-            cur_muted = self.audio_output.isMuted() if self.audio_output else (self.vol_slider.value() == 0)
-            new_output = QAudioOutput(device, self)
-            new_output.setVolume(cur_vol)
-            new_output.setMuted(cur_muted)
-            old_output = self.audio_output
-            self.player.setAudioOutput(new_output)
-            self.audio_output = new_output
-            if old_output:
-                old_output.deleteLater()
-            self.status_label.setText(f"已切换声道: {device.description()[:25]}")
+            if hasattr(self, "audio_output") and self.audio_output and not device.isNull():
+                self.audio_output.setDevice(device)
+                self.status_label.setText(f"已切换声道: {device.description()[:25]}")
         except Exception:
             pass
 
     # ── Playback Controls ──
 
     def toggle_play(self):
-        self._rebind_audio_output()
-        pool = self._get_active_playback_list()
+        pool = self._get_active_playback_list() if hasattr(self, "_get_active_playback_list") else getattr(self, "playlist", [])
         if pool and self.current_index == -1:
             self.play_next()
             return
@@ -2003,7 +1986,6 @@ class MediaPlayerWindow(QWidget):
     def play(self):
         if not self._ensure_vlc():
             return
-        self._rebind_audio_output()
         self.player.play()
         self.is_playing_state = True
         self.play_btn.setIcon(self._pause_icon)
