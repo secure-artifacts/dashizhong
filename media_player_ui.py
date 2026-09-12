@@ -583,9 +583,25 @@ class YtDlpStreamWorker(QObject):
                 ydl_opts['proxy'] = proxy
 
             try:
+                import os
+                if shutil.which("node"):
+                    ydl_opts['js_runtimes'] = {'node': {}}
+                for cc in [
+                    Path(os.environ.get("LOCALAPPDATA", "")) / "ClockAlarm" / "cookies.txt",
+                    root / "cookies.txt",
+                    Path(os.path.dirname(__file__)) / "cookies.txt",
+                    Path.cwd() / "cookies.txt",
+                ]:
+                    if cc.is_file() and cc.stat().st_size > 0:
+                        ydl_opts['cookiefile'] = str(cc)
+                        break
+            except Exception:
+                pass
+
+            try:
                 import imageio_ffmpeg
                 ydl_opts['ffmpeg_location'] = imageio_ffmpeg.get_ffmpeg_exe()
-            except ImportError:
+            except Exception:
                 pass
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.extract_info(url, download=True)
@@ -2488,6 +2504,15 @@ class MediaPlayerWindow(QWidget):
             return
         self._media_retry_pending = True
         short_detail = detail.strip() or "未知原因"
+        is_bot_or_429 = any(k in short_detail.lower() for k in ("not a bot", "429", "too many requests", "sign in"))
+        if is_bot_or_429:
+            self.status_label.setText("播放失败：当前代理节点被 YouTube 拦截验证 (429/人机验证)，请在代理软件中切换其他节点")
+            self.status_label.setToolTip("YouTube 对当前代理节点触发了人机验证 (HTTP 429)。\n解决办法：请打开您的代理软件（如 v2rayN / Clash），切换至其他节点线路后再试。")
+            self.is_playing_state = False
+            self.play_btn.setIcon(self._play_icon)
+            self._media_retry_pending = False
+            return
+
         if len(short_detail) > 120:
             short_detail = short_detail[:117] + "…"
         self.status_label.setText(f"播放失败：{label}（{short_detail}），即将播放下一项")
