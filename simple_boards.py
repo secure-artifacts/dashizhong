@@ -37,6 +37,63 @@ NOTE_COLORS = [
 ]
 
 
+def copy_to_clipboard(text: str) -> bool:
+    """Safely and reliably copy text to Windows clipboard using both Qt and native Win32 API."""
+    if text is None:
+        return False
+    text = str(text)
+    try:
+        app = QApplication.instance()
+        if app:
+            cb = app.clipboard()
+            if cb:
+                cb.setText(text)
+    except Exception:
+        pass
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+
+        CF_UNICODETEXT = 13
+        GMEM_MOVEABLE = 0x0002
+
+        kernel32.GlobalAlloc.restype = wintypes.HGLOBAL
+        kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+        kernel32.GlobalLock.restype = wintypes.LPVOID
+        kernel32.GlobalLock.argtypes = [wintypes.HGLOBAL]
+        kernel32.GlobalUnlock.restype = wintypes.BOOL
+        kernel32.GlobalUnlock.argtypes = [wintypes.HGLOBAL]
+        user32.SetClipboardData.restype = wintypes.HANDLE
+        user32.SetClipboardData.argtypes = [wintypes.UINT, wintypes.HANDLE]
+
+        for _ in range(5):
+            if user32.OpenClipboard(None):
+                try:
+                    user32.EmptyClipboard()
+                    data = text.encode("utf-16-le") + b"\x00\x00"
+                    h_mem = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(data))
+                    if h_mem:
+                        p_mem = kernel32.GlobalLock(h_mem)
+                        if p_mem:
+                            ctypes.memmove(p_mem, data, len(data))
+                            kernel32.GlobalUnlock(h_mem)
+                            if user32.SetClipboardData(CF_UNICODETEXT, h_mem):
+                                return True
+                            else:
+                                kernel32.GlobalFree(h_mem)
+                    return False
+                finally:
+                    user32.CloseClipboard()
+            import time
+            time.sleep(0.02)
+    except Exception:
+        pass
+    return True
+
+
 def _luma(hex_color: str) -> float:
     c = QColor(hex_color)
     # relative luminance
@@ -540,7 +597,7 @@ class TodoItemRowWidget(QWidget):
         act_copy = menu.addAction("📋 复制事项内容")
         text = self.lbl_text.text()
         act_copy.setEnabled(bool(text))
-        act_copy.triggered.connect(lambda: QApplication.clipboard().setText(text))
+        act_copy.triggered.connect(lambda: copy_to_clipboard(text))
 
         menu.addSeparator()
 
@@ -1084,15 +1141,26 @@ class NoteTextEdit(QTextEdit):
     """Rich text edit for sticky notes with Chinese context menu and smart copy fallback."""
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
-        if event.matches(QKeySequence.StandardKey.Copy) and not self.textCursor().hasSelection():
-            text = self.toPlainText()
-            if text:
-                QApplication.clipboard().setText(text)
-                event.accept()
-                return
+        if event.matches(QKeySequence.StandardKey.Copy):
+            cursor = self.textCursor()
+            if cursor.hasSelection():
+                selected = cursor.selectedText().replace("\u2029", "\n")
+                copy_to_clipboard(selected)
+            else:
+                text = self.toPlainText()
+                if text:
+                    copy_to_clipboard(text)
+            event.accept()
+            return
         super().keyPressEvent(event)
 
     def contextMenuEvent(self, event: QContextMenuEvent) -> None:
+        cursor = self.textCursor()
+        has_sel = cursor.hasSelection()
+        selected_text = cursor.selectedText().replace("\u2029", "\n") if has_sel else ""
+        all_text = self.toPlainText()
+        has_text = bool(all_text)
+
         menu = QMenu(self)
         menu.setStyleSheet("""
             QMenu {
@@ -1121,34 +1189,37 @@ class NoteTextEdit(QTextEdit):
                 margin: 4px 4px;
             }
         """)
-        has_sel = self.textCursor().hasSelection()
-        has_text = bool(self.toPlainText())
 
         act_copy = menu.addAction("📋 复制 (Ctrl+C)")
-        act_copy.setEnabled(has_sel or has_text)
+        act_copy.setEnabled(bool(selected_text or has_text))
 
         def _do_copy():
-            if has_sel:
-                self.copy()
-            elif has_text:
-                QApplication.clipboard().setText(self.toPlainText())
+            if selected_text:
+                copy_to_clipboard(selected_text)
+            elif all_text:
+                copy_to_clipboard(all_text)
 
         act_copy.triggered.connect(_do_copy)
 
         act_copy_all = menu.addAction("📄 复制全部便签内容")
         act_copy_all.setEnabled(has_text)
-        act_copy_all.triggered.connect(lambda: QApplication.clipboard().setText(self.toPlainText()))
+        act_copy_all.triggered.connect(lambda: copy_to_clipboard(self.toPlainText()))
 
         menu.addSeparator()
 
         act_cut = menu.addAction("✂️ 剪切 (Ctrl+X)")
         act_cut.setEnabled(has_sel and not self.isReadOnly())
-        act_cut.triggered.connect(self.cut)
+
+        def _do_cut():
+            if selected_text:
+                copy_to_clipboard(selected_text)
+                self.textCursor().removeSelectedText()
+
+        act_cut.triggered.connect(_do_cut)
 
         act_paste = menu.addAction("📥 粘贴 (Ctrl+V)")
-        clipboard = QApplication.clipboard()
-        can_paste = not self.isReadOnly() and bool(clipboard.text())
-        act_paste.setEnabled(can_paste)
+        clipboard_text = QApplication.clipboard().text()
+        act_paste.setEnabled(not self.isReadOnly() and bool(clipboard_text))
         act_paste.triggered.connect(self.paste)
 
         menu.addSeparator()
@@ -1271,15 +1342,21 @@ class StickyNoteWindow(_DragBase):
         self.body.textChanged.connect(self._persist)
 
     def _copy_all_to_clipboard(self) -> None:
-        text = self.body.toPlainText()
-        if not text.strip():
-            text = self.title.text().strip()
+        cursor = self.body.textCursor()
+        if cursor.hasSelection():
+            text = cursor.selectedText().replace("\u2029", "\n")
+            tip_msg = "已复制选中文本到剪贴板！"
+        else:
+            text = self.body.toPlainText()
+            if not text.strip():
+                text = self.title.text().strip()
+            tip_msg = "已成功复制便签全文到剪贴板！"
         if not text:
             return
-        QApplication.clipboard().setText(text)
+        copy_to_clipboard(text)
         orig_tip = self.btn_copy.toolTip()
         self.btn_copy.setText("✔")
-        self.btn_copy.setToolTip("已成功复制便签内容到剪贴板！")
+        self.btn_copy.setToolTip(tip_msg)
         QTimer.singleShot(
             1500,
             lambda: (self.btn_copy.setText("📋"), self.btn_copy.setToolTip(orig_tip))
