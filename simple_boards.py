@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import uuid
 
-from PyQt6.QtCore import Qt, QPoint, QSize
-from PyQt6.QtGui import QColor, QMouseEvent
+from PyQt6.QtCore import Qt, QPoint, QSize, QTimer
+from PyQt6.QtGui import QColor, QMouseEvent, QKeyEvent, QKeySequence, QContextMenuEvent
 from PyQt6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QColorDialog,
     QFrame,
@@ -15,6 +16,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QPushButton,
     QTextEdit,
     QVBoxLayout,
@@ -82,7 +84,7 @@ def _board_qss(bg: str = "#bfdbfe", accent: str = "#4f46e5") -> str:
     QLineEdit, QTextEdit, QListWidget {{
         background: {input_bg}; color: {fg};
         border: none; border-radius: 8px; padding: 6px;
-        selection-background-color: rgba(0,0,0,0.2); selection-color: {fg};
+        selection-background-color: #2563eb; selection-color: #ffffff;
         font-size: 14px;
     }}
     QLineEdit#boardTitle, QLineEdit#noteTitle {{
@@ -323,18 +325,26 @@ class _DragBase(QWidget):
             self.move(e.globalPosition().toPoint() - self.drag_pos)
 
 class TodoItemRowWidget(QWidget):
-    """Custom row widget for todo items with clear checkbox and zero-overlap inline editing."""
+    """Custom row widget for todo items with clear checkbox, visible edit button, and inline editing."""
 
-    def __init__(self, item_data: dict, on_toggle=None, on_rename=None, parent=None):
+    def __init__(
+        self,
+        item_data: dict,
+        on_toggle=None,
+        on_rename=None,
+        on_delete=None,
+        parent=None,
+    ):
         super().__init__(parent)
         self.item_data = item_data
         self.on_toggle = on_toggle
         self.on_rename = on_rename
+        self.on_delete = on_delete
         self.setMinimumHeight(44)
 
         lay = QHBoxLayout(self)
         lay.setContentsMargins(6, 4, 6, 4)
-        lay.setSpacing(8)
+        lay.setSpacing(6)
 
         # Clear, prominent Checkbox
         self.chk = QCheckBox()
@@ -361,20 +371,21 @@ class TodoItemRowWidget(QWidget):
         self.chk.toggled.connect(self._handle_toggle)
         lay.addWidget(self.chk)
 
-        # Task Text Label (Double click to edit)
+        # Task Text Label (Click pencil or double-click to edit)
         self.lbl_text = QLabel(str(item_data.get("text") or ""))
         self.lbl_text.setWordWrap(True)
-        self.lbl_text.setToolTip("💡 双击可编辑修改此事项")
+        self.lbl_text.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.lbl_text.setToolTip("💡 点击行末 ✏️ 或双击可直接编辑修改此事项")
         self._update_label_style(bool(item_data.get("done")))
         lay.addWidget(self.lbl_text, 1)
 
-        # In-place Edit LineEdit (hidden by default, 0% overlap)
+        # In-place Edit LineEdit (hidden by default)
         self.edit_line = QLineEdit(str(item_data.get("text") or ""))
         self.edit_line.setStyleSheet("""
             QLineEdit {
                 background: #ffffff;
                 color: #0f172a;
-                border: 2px solid #10b981;
+                border: 2px solid #3b82f6;
                 border-radius: 6px;
                 padding: 4px 8px;
                 font-size: 14px;
@@ -382,11 +393,167 @@ class TodoItemRowWidget(QWidget):
             }
         """)
         self.edit_line.hide()
-        self.edit_line.editingFinished.connect(self._finish_editing)
+        self.edit_line.returnPressed.connect(self._finish_editing)
+        self.edit_line.keyPressEvent = self._handle_edit_key
         lay.addWidget(self.edit_line, 1)
 
+        # Normal mode action buttons:
+        # Edit pencil button (✏️)
+        self.btn_edit = QPushButton("✏️")
+        self.btn_edit.setFixedSize(26, 26)
+        self.btn_edit.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_edit.setToolTip("✏️ 编辑修改此待办")
+        self.btn_edit.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                border: none;
+                border-radius: 5px;
+                font-size: 13px;
+                padding: 0;
+            }
+            QPushButton:hover {
+                background: rgba(59, 130, 246, 0.20);
+            }
+        """)
+        self.btn_edit.clicked.connect(self._start_editing)
+        lay.addWidget(self.btn_edit)
+
+        # Delete button (✕)
+        self.btn_del = QPushButton("✕")
+        self.btn_del.setFixedSize(26, 26)
+        self.btn_del.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_del.setToolTip("✕ 删除此待办事项")
+        self.btn_del.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                color: #ef4444;
+                border: none;
+                border-radius: 5px;
+                font-size: 14px;
+                font-weight: 700;
+                padding: 0;
+            }
+            QPushButton:hover {
+                background: rgba(239, 68, 68, 0.20);
+                color: #dc2626;
+            }
+        """)
+        self.btn_del.clicked.connect(self._handle_delete)
+        lay.addWidget(self.btn_del)
+
+        # Edit mode action buttons:
+        # Confirm button (✔)
+        self.btn_confirm = QPushButton("✔")
+        self.btn_confirm.setFixedSize(26, 26)
+        self.btn_confirm.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_confirm.setToolTip("✔ 保存修改 (回车)")
+        self.btn_confirm.setStyleSheet("""
+            QPushButton {
+                background: #10b981;
+                color: #ffffff;
+                border: none;
+                border-radius: 5px;
+                font-size: 13px;
+                font-weight: 700;
+                padding: 0;
+            }
+            QPushButton:hover {
+                background: #059669;
+            }
+        """)
+        self.btn_confirm.clicked.connect(self._finish_editing)
+        self.btn_confirm.hide()
+        lay.addWidget(self.btn_confirm)
+
+        # Cancel button (✕)
+        self.btn_cancel = QPushButton("✕")
+        self.btn_cancel.setFixedSize(26, 26)
+        self.btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_cancel.setToolTip("✕ 取消修改 (Esc)")
+        self.btn_cancel.setStyleSheet("""
+            QPushButton {
+                background: #94a3b8;
+                color: #ffffff;
+                border: none;
+                border-radius: 5px;
+                font-size: 13px;
+                font-weight: 700;
+                padding: 0;
+            }
+            QPushButton:hover {
+                background: #64748b;
+            }
+        """)
+        self.btn_cancel.clicked.connect(self._cancel_editing)
+        self.btn_cancel.hide()
+        lay.addWidget(self.btn_cancel)
+
         # Connect double click on label to start editing
-        self.lbl_text.mouseDoubleClickEvent = self._start_editing
+        self.lbl_text.mouseDoubleClickEvent = lambda event: self._start_editing()
+
+    def _handle_edit_key(self, event: QKeyEvent) -> None:
+        if event.key() == Qt.Key.Key_Escape:
+            self._cancel_editing()
+            event.accept()
+            return
+        QLineEdit.keyPressEvent(self.edit_line, event)
+
+    def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._start_editing()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+    def contextMenuEvent(self, event: QContextMenuEvent) -> None:
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background: #ffffff;
+                color: #1e293b;
+                border: 1px solid #cbd5e1;
+                border-radius: 8px;
+                padding: 4px;
+                font-size: 13px;
+                font-weight: 500;
+            }
+            QMenu::item {
+                padding: 6px 20px 6px 10px;
+                border-radius: 5px;
+            }
+            QMenu::item:selected {
+                background: #3b82f6;
+                color: #ffffff;
+            }
+            QMenu::item:disabled {
+                color: #94a3b8;
+            }
+            QMenu::separator {
+                height: 1px;
+                background: #e2e8f0;
+                margin: 4px 4px;
+            }
+        """)
+        act_edit = menu.addAction("✏️ 编辑此事项")
+        act_edit.triggered.connect(self._start_editing)
+
+        act_copy = menu.addAction("📋 复制事项内容")
+        text = self.lbl_text.text()
+        act_copy.setEnabled(bool(text))
+        act_copy.triggered.connect(lambda: QApplication.clipboard().setText(text))
+
+        menu.addSeparator()
+
+        is_done = self.chk.isChecked()
+        act_toggle = menu.addAction("↩️ 恢复为未完成" if is_done else "✔️ 标记为已完成")
+        act_toggle.triggered.connect(lambda: self.chk.setChecked(not is_done))
+
+        menu.addSeparator()
+
+        act_del = menu.addAction("🗑️ 删除此事项")
+        act_del.triggered.connect(self._handle_delete)
+
+        menu.exec(event.globalPos())
 
     def _update_label_style(self, done: bool) -> None:
         font = self.lbl_text.font()
@@ -402,12 +569,31 @@ class TodoItemRowWidget(QWidget):
         if callable(self.on_toggle):
             self.on_toggle(str(self.item_data.get("id")), checked)
 
+    def _handle_delete(self) -> None:
+        if callable(self.on_delete):
+            self.on_delete(str(self.item_data.get("id")))
+
     def _start_editing(self, event=None) -> None:
         self.lbl_text.hide()
+        self.btn_edit.hide()
+        self.btn_del.hide()
         self.edit_line.setText(self.lbl_text.text())
         self.edit_line.show()
+        self.btn_confirm.show()
+        self.btn_cancel.show()
         self.edit_line.setFocus()
         self.edit_line.selectAll()
+
+    def _cancel_editing(self) -> None:
+        if not self.edit_line.isVisible():
+            return
+        self.edit_line.setText(self.lbl_text.text())
+        self.edit_line.hide()
+        self.btn_confirm.hide()
+        self.btn_cancel.hide()
+        self.lbl_text.show()
+        self.btn_edit.show()
+        self.btn_del.show()
 
     def _finish_editing(self) -> None:
         if not self.edit_line.isVisible():
@@ -415,10 +601,15 @@ class TodoItemRowWidget(QWidget):
         new_text = self.edit_line.text().strip()
         if new_text and new_text != self.lbl_text.text():
             self.lbl_text.setText(new_text)
+            self.item_data["text"] = new_text
             if callable(self.on_rename):
                 self.on_rename(str(self.item_data.get("id")), new_text)
         self.edit_line.hide()
+        self.btn_confirm.hide()
+        self.btn_cancel.hide()
         self.lbl_text.show()
+        self.btn_edit.show()
+        self.btn_del.show()
 
 
 class TodoBoard(_DragBase):
@@ -552,7 +743,7 @@ class TodoBoard(_DragBase):
         self.list = QListWidget()
         self.list.setMinimumHeight(140)
         bl.addWidget(self.list, 1)
-        tip = QLabel("双击事项可编辑")
+        tip = QLabel("💡 提示：点击行末 ✏️ 或双击事项可直接修改内容")
         tip.setStyleSheet("font-size:11px; font-weight:600; color:#64748b;")
         bl.addWidget(tip)
         row = QHBoxLayout()
@@ -569,12 +760,17 @@ class TodoBoard(_DragBase):
         row.addWidget(self.btn_add)
         bl.addLayout(row)
         row2 = QHBoxLayout()
-        del_btn = QPushButton("删除选中", objectName="soft")
+        edit_btn = QPushButton("✏️ 编辑选中", objectName="soft")
+        edit_btn.setMinimumHeight(30)
+        edit_btn.setToolTip("编辑当前选中的待办事项 (或直接点击行末 ✏️)")
+        edit_btn.clicked.connect(self._edit_selected)
+        del_btn = QPushButton("🗑️ 删除选中", objectName="soft")
         del_btn.setMinimumHeight(30)
         del_btn.clicked.connect(self._delete)
         clr = QPushButton("清除已完成", objectName="soft")
         clr.setMinimumHeight(30)
         clr.clicked.connect(self._clear_done)
+        row2.addWidget(edit_btn)
         row2.addWidget(del_btn)
         row2.addWidget(clr)
         bl.addLayout(row2)
@@ -721,6 +917,7 @@ class TodoBoard(_DragBase):
                 t,
                 on_toggle=self._on_row_toggle,
                 on_rename=self._on_row_rename,
+                on_delete=self._on_row_delete,
                 parent=self.list,
             )
             sh = row_w.sizeHint()
@@ -731,6 +928,24 @@ class TodoBoard(_DragBase):
         self.list.blockSignals(False)
         if self._collapsed:
             self.title_edit.setText(self._summary_title())
+
+    def _edit_selected(self) -> None:
+        it = self.list.currentItem()
+        if not it:
+            if self.list.count() > 0:
+                it = self.list.item(0)
+                self.list.setCurrentItem(it)
+            else:
+                return
+        w = self.list.itemWidget(it)
+        if isinstance(w, TodoItemRowWidget):
+            w._start_editing()
+
+    def _on_row_delete(self, tid: str) -> None:
+        if tid:
+            self.mgr.remove(str(tid))
+            self.on_save()
+            self.refresh()
 
     def _on_row_toggle(self, tid: str, checked: bool) -> None:
         for t in self.mgr.list_items():
@@ -760,11 +975,8 @@ class TodoBoard(_DragBase):
             self.list.setCurrentRow(0)
 
     def _on_row_rename(self, tid: str, new_text: str) -> None:
-        for t in self.mgr.list_items():
-            if str(t.get("id")) == str(tid):
-                t["text"] = new_text[:200]
-                self.on_save()
-                break
+        if self.mgr.update(str(tid), new_text):
+            self.on_save()
         if self._collapsed:
             self.title_edit.setText(self._summary_title())
 
@@ -868,6 +1080,90 @@ class TodosController:
             self.on_save()
 
 
+class NoteTextEdit(QTextEdit):
+    """Rich text edit for sticky notes with Chinese context menu and smart copy fallback."""
+
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        if event.matches(QKeySequence.StandardKey.Copy) and not self.textCursor().hasSelection():
+            text = self.toPlainText()
+            if text:
+                QApplication.clipboard().setText(text)
+                event.accept()
+                return
+        super().keyPressEvent(event)
+
+    def contextMenuEvent(self, event: QContextMenuEvent) -> None:
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background: #ffffff;
+                color: #1e293b;
+                border: 1px solid #cbd5e1;
+                border-radius: 8px;
+                padding: 4px;
+                font-size: 13px;
+                font-weight: 500;
+            }
+            QMenu::item {
+                padding: 6px 20px 6px 10px;
+                border-radius: 5px;
+            }
+            QMenu::item:selected {
+                background: #3b82f6;
+                color: #ffffff;
+            }
+            QMenu::item:disabled {
+                color: #94a3b8;
+            }
+            QMenu::separator {
+                height: 1px;
+                background: #e2e8f0;
+                margin: 4px 4px;
+            }
+        """)
+        has_sel = self.textCursor().hasSelection()
+        has_text = bool(self.toPlainText())
+
+        act_copy = menu.addAction("📋 复制 (Ctrl+C)")
+        act_copy.setEnabled(has_sel or has_text)
+
+        def _do_copy():
+            if has_sel:
+                self.copy()
+            elif has_text:
+                QApplication.clipboard().setText(self.toPlainText())
+
+        act_copy.triggered.connect(_do_copy)
+
+        act_copy_all = menu.addAction("📄 复制全部便签内容")
+        act_copy_all.setEnabled(has_text)
+        act_copy_all.triggered.connect(lambda: QApplication.clipboard().setText(self.toPlainText()))
+
+        menu.addSeparator()
+
+        act_cut = menu.addAction("✂️ 剪切 (Ctrl+X)")
+        act_cut.setEnabled(has_sel and not self.isReadOnly())
+        act_cut.triggered.connect(self.cut)
+
+        act_paste = menu.addAction("📥 粘贴 (Ctrl+V)")
+        clipboard = QApplication.clipboard()
+        can_paste = not self.isReadOnly() and bool(clipboard.text())
+        act_paste.setEnabled(can_paste)
+        act_paste.triggered.connect(self.paste)
+
+        menu.addSeparator()
+
+        act_select_all = menu.addAction("🔘 全选 (Ctrl+A)")
+        act_select_all.setEnabled(has_text)
+        act_select_all.triggered.connect(self.selectAll)
+
+        act_clear = menu.addAction("🗑️ 清空内容")
+        act_clear.setEnabled(has_text and not self.isReadOnly())
+        act_clear.triggered.connect(self.clear)
+
+        menu.exec(event.globalPos())
+
+
 class StickyNoteWindow(_DragBase):
     """One floating sticky note with color. Use ＋ to open another note."""
 
@@ -922,9 +1218,15 @@ class StickyNoteWindow(_DragBase):
         self.btn_new.clicked.connect(self._add_another)
         head.addWidget(self.btn_new)
 
-        self.btn_list = QPushButton("📋", objectName="soft")
+        self.btn_copy = QPushButton("📋", objectName="soft")
+        self.btn_copy.setFixedSize(28, 28)
+        self.btn_copy.setToolTip("📋 复制便签内容到剪贴板")
+        self.btn_copy.clicked.connect(self._copy_all_to_clipboard)
+        head.addWidget(self.btn_copy)
+
+        self.btn_list = QPushButton("🗂️", objectName="soft")
         self.btn_list.setFixedSize(28, 28)
-        self.btn_list.setToolTip("📋 历史便签管理 (查看所有保存的便签)")
+        self.btn_list.setToolTip("🗂️ 历史便签管理 (查看所有保存的便签)")
         self.btn_list.clicked.connect(self._open_manager)
         head.addWidget(self.btn_list)
 
@@ -959,7 +1261,7 @@ class StickyNoteWindow(_DragBase):
         head.addWidget(self.btn_close)
 
         lay.addWidget(self.header_bar)
-        self.body = QTextEdit()
+        self.body = NoteTextEdit()
         self.body.setPlainText(str(note.get("body") or ""))
         self.body.setPlaceholderText("开始记录…")
         lay.addWidget(self.body, 1)
@@ -967,6 +1269,23 @@ class StickyNoteWindow(_DragBase):
         self._apply_note_style()
         self.title.editingFinished.connect(self._persist)
         self.body.textChanged.connect(self._persist)
+
+    def _copy_all_to_clipboard(self) -> None:
+        text = self.body.toPlainText()
+        if not text.strip():
+            text = self.title.text().strip()
+        if not text:
+            return
+        QApplication.clipboard().setText(text)
+        orig_tip = self.btn_copy.toolTip()
+        self.btn_copy.setText("✔")
+        self.btn_copy.setToolTip("已成功复制便签内容到剪贴板！")
+        QTimer.singleShot(
+            1500,
+            lambda: (self.btn_copy.setText("📋"), self.btn_copy.setToolTip(orig_tip))
+            if hasattr(self, "btn_copy") and not self.btn_copy.isHidden()
+            else None,
+        )
 
     def _apply_note_style(self) -> None:
         fg = _fg_on(self.color)
@@ -989,7 +1308,7 @@ class StickyNoteWindow(_DragBase):
             f"border-radius:7px; padding:0; font-weight:700; font-size:14px; }}"
             f"QPushButton:hover {{ background:rgba(255,255,255,0.50); color:#2563eb; }}"
         )
-        for b in (self.btn_new, self.btn_list, self.btn_pin, self.btn_fold, self.btn_color, self.btn_delete, self.btn_close):
+        for b in (self.btn_new, self.btn_copy, self.btn_list, self.btn_pin, self.btn_fold, self.btn_color, self.btn_delete, self.btn_close):
             b.setStyleSheet(soft)
         self.btn_new.setStyleSheet(soft + "QPushButton { font-size:19px; }")
 
@@ -1023,6 +1342,7 @@ class StickyNoteWindow(_DragBase):
             self.body.hide()
             self.btn_fold.setText("🔺")
             self.btn_new.hide()
+            self.btn_copy.hide()
             self.btn_list.hide()
             self.btn_pin.hide()
             self.btn_color.hide()
@@ -1047,6 +1367,7 @@ class StickyNoteWindow(_DragBase):
             self.body.show()
             self.btn_fold.setText("➖")
             self.btn_new.show()
+            self.btn_copy.show()
             self.btn_list.show()
             self.btn_pin.show()
             self.btn_color.show()

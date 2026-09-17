@@ -40,6 +40,16 @@ class TodoManager:
                 return "已完成。" if item["done"] else "已重新打开。"
         return "未找到该待办。"
 
+    def update(self, item_id: str, new_text: str) -> bool:
+        cleaned = (new_text or "").strip()
+        if not cleaned:
+            return False
+        for item in self.board.get("items") or []:
+            if item.get("id") == item_id:
+                item["text"] = cleaned[:200]
+                return True
+        return False
+
     def remove(self, item_id: str) -> str:
         before = len(self.board.get("items") or [])
         self.board["items"] = [

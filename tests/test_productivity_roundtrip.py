@@ -17,6 +17,7 @@ class ProductivityRoundtripTests(unittest.TestCase):
             todos = TodoManager(first)
             todos.add('测试待办')
             item = todos.list_items()[0]
+            self.assertTrue(todos.update(item['id'], '修改后的待办内容'))
             todos.toggle(item['id'])
             other = boards.add_board('第二块清单')
             TodoManager(other).add('保留项目')
@@ -26,6 +27,7 @@ class ProductivityRoundtripTests(unittest.TestCase):
             store.save_state()
             restored = JsonStore()
             self.assertTrue(restored.state['todo_lists'][0]['items'][0]['done'])
+            self.assertEqual(restored.state['todo_lists'][0]['items'][0]['text'], '修改后的待办内容')
             self.assertEqual(NoteManager(restored.state).get(note['id'])['body'], '新内容')
             self.assertEqual(restored.state['alarms'], store.state['alarms'])
             todos.clear_done()
