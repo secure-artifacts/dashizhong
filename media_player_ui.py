@@ -496,13 +496,78 @@ class YtDlpWorker(QObject):
         threading.Thread(target=_run, daemon=True).start()
 
 
+def normalize_cookie_content(raw_text: str) -> str:
+    """
+    Normalizes pasted cookies into standard Netscape format expected by yt-dlp.
+    Supports Netscape format, JSON format (EditThisCookie), and raw HTTP Header 'Cookie: ...'.
+    """
+    raw_text = (raw_text or "").strip()
+    if not raw_text:
+        return ""
+
+    # Case 1: Already Netscape format
+    if "# Netscape" in raw_text or ("\t" in raw_text and ("youtube.com" in raw_text or "google.com" in raw_text)):
+        if not raw_text.startswith("# Netscape"):
+            raw_text = "# Netscape HTTP Cookie File\n" + raw_text
+        return raw_text if raw_text.endswith("\n") else raw_text + "\n"
+
+    # Case 2: JSON format (EditThisCookie export)
+    if (raw_text.startswith("[") and raw_text.endswith("]")) or (raw_text.startswith("{") and raw_text.endswith("}")):
+        try:
+            import json
+            data = json.loads(raw_text)
+            if isinstance(data, dict):
+                data = [data]
+            if isinstance(data, list):
+                lines = ["# Netscape HTTP Cookie File", "# Converted by ClockAlarm"]
+                for item in data:
+                    if isinstance(item, dict) and "name" in item and "value" in item:
+                        domain = item.get("domain") or ".youtube.com"
+                        flag = "TRUE" if str(domain).startswith(".") else "FALSE"
+                        path = item.get("path") or "/"
+                        secure = "TRUE" if item.get("secure", True) else "FALSE"
+                        expires = str(int(item.get("expirationDate") or 2147483647))
+                        name = str(item.get("name"))
+                        val = str(item.get("value"))
+                        lines.append(f"{domain}\t{flag}\t{path}\t{secure}\t{expires}\t{name}\t{val}")
+                if len(lines) > 2:
+                    return "\n".join(lines) + "\n"
+        except Exception:
+            pass
+
+    # Case 3: Raw HTTP header key=value; pairs
+    text = raw_text
+    if text.lower().startswith("cookie:"):
+        text = text[7:].strip()
+
+    lines = ["# Netscape HTTP Cookie File", "# Converted from HTTP Header by ClockAlarm"]
+    pairs = [p.strip() for p in text.replace("\r", "").replace("\n", "").split(";") if p.strip()]
+    count = 0
+    for p in pairs:
+        if "=" in p:
+            name, val = p.split("=", 1)
+            name = name.strip()
+            val = val.strip()
+            if name:
+                count += 1
+                lines.append(f".youtube.com\tTRUE\t/\tTRUE\t2147483647\t{name}\t{val}")
+                if any(k in name for k in ("SID", "HSID", "SSID", "APISID", "SAPISID", "LOGIN_INFO", "__Secure")):
+                    lines.append(f".google.com\tTRUE\t/\tTRUE\t2147483647\t{name}\t{val}")
+
+    if count > 0:
+        return "\n".join(lines) + "\n"
+
+    return raw_text if raw_text.endswith("\n") else raw_text + "\n"
+
+
 class YtDlpStreamWorker(QObject):
     media_ready = pyqtSignal(int, str, int)  # req_id, file_path, height
     media_status = pyqtSignal(int, str)
     error = pyqtSignal(int, str)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, state=None):
         super().__init__(parent)
+        self.state = state if isinstance(state, dict) else {}
         self._cancel_event = threading.Event()
         self._prefetch_cancel = threading.Event()
         self._download_lock = threading.Lock()
@@ -582,24 +647,44 @@ class YtDlpStreamWorker(QObject):
             if proxy:
                 ydl_opts['proxy'] = proxy
 
+            cookie_file = None
             try:
                 import os
                 if shutil.which("node"):
                     ydl_opts['js_runtimes'] = {'node': {}}
-                for cc in [
-                    Path(os.environ.get("LOCALAPPDATA", "")) / "ClockAlarm" / "cookies.txt",
-                    Path(os.environ.get("LOCALAPPDATA", "")) / "ClockAlarm" / "youtube_cookies.txt",
-                    root / "cookies.txt",
-                    Path(os.path.dirname(__file__)) / "cookies.txt",
-                    Path(os.path.dirname(__file__)) / "youtube_cookies.txt",
-                    Path.cwd() / "cookies.txt",
-                    Path.cwd() / "youtube_cookies.txt",
-                ]:
-                    if cc.is_file() and cc.stat().st_size > 0:
-                        ydl_opts['cookiefile'] = str(cc)
-                        break
+
+                media_cfg = self.state.get("media", {}) if isinstance(self.state, dict) else {}
+                raw_cookies = (media_cfg.get("cookies_text") or "").strip()
+                loc_dir = Path(os.environ.get("LOCALAPPDATA", "")) / "ClockAlarm"
+                target_cookie = loc_dir / "cookies.txt"
+
+                if raw_cookies:
+                    loc_dir.mkdir(parents=True, exist_ok=True)
+                    normalized = normalize_cookie_content(raw_cookies)
+                    target_cookie.write_text(normalized, encoding="utf-8")
+                    cookie_file = target_cookie
+                else:
+                    for cc in [
+                        target_cookie,
+                        loc_dir / "youtube_cookies.txt",
+                        root / "cookies.txt",
+                        Path(os.path.dirname(__file__)) / "cookies.txt",
+                        Path(os.path.dirname(__file__)) / "youtube_cookies.txt",
+                        Path.cwd() / "cookies.txt",
+                        Path.cwd() / "youtube_cookies.txt",
+                    ]:
+                        if cc.is_file() and cc.stat().st_size > 0:
+                            cookie_file = cc
+                            break
             except Exception:
                 pass
+
+            if cookie_file:
+                ydl_opts['cookiefile'] = str(cookie_file)
+                # When authenticated with user cookies, web client provides highest quality & no 429
+                ydl_opts['extractor_args'] = {'youtube': {'player_client': ['web', 'mweb', 'ios', 'android']}}
+            else:
+                ydl_opts['extractor_args'] = {'youtube': {'player_client': ['ios', 'visionos', 'mweb', 'android', 'web']}}
 
             try:
                 import imageio_ffmpeg
@@ -1733,7 +1818,7 @@ class MediaPlayerWindow(QWidget):
         self.extractor.error.connect(self._on_extract_error)
         self.extractor.limit_reached.connect(self._on_extract_limit)
 
-        self.stream_worker = YtDlpStreamWorker()
+        self.stream_worker = YtDlpStreamWorker(self, state=self.state)
         self.stream_worker.media_ready.connect(self._on_media_ready)
         self.stream_worker.media_status.connect(self._on_media_status)
         self.stream_worker.error.connect(self._on_stream_error)

@@ -50,6 +50,7 @@ DEFAULT_STATE: dict[str, Any] = {
         "auto_add_to_playlist": True,
         "notify_on_new_video": True,
         "seen_video_ids": [],
+        "cookies_text": "",
     },
     "todos": [],
     "notes": [],

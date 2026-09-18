@@ -24,6 +24,35 @@ class MediaStreamFallbackTests(unittest.TestCase):
         self.assertIn("player_client': ['ios', 'visionos', 'mweb', 'android', 'web']", source)
         self.assertIn("fallback_opts['extractor_args'] = {'youtube': {'player_client': ['mweb', 'web_safari', 'ios', 'web']}}", source)
 
+    def test_normalize_cookie_content(self) -> None:
+        from media_player_ui import normalize_cookie_content
+        self.assertEqual(normalize_cookie_content(""), "")
+        self.assertEqual(normalize_cookie_content("   "), "")
+
+        netscape_raw = ".youtube.com\tTRUE\t/\tTRUE\t2147483647\tLOGIN_INFO\taf8723\n"
+        norm = normalize_cookie_content(netscape_raw)
+        self.assertTrue(norm.startswith("# Netscape HTTP Cookie File"))
+        self.assertIn("LOGIN_INFO\taf8723", norm)
+
+        json_raw = '[{"name": "LOGIN_INFO", "value": "token999", "domain": ".youtube.com", "secure": true}]'
+        norm = normalize_cookie_content(json_raw)
+        self.assertIn("# Netscape HTTP Cookie File", norm)
+        self.assertIn("LOGIN_INFO\ttoken999", norm)
+
+        header_raw = "Cookie: SID=abc12345; HSID=xyz678;"
+        norm = normalize_cookie_content(header_raw)
+        self.assertIn("# Netscape HTTP Cookie File", norm)
+        self.assertIn(".youtube.com\tTRUE\t/\tTRUE\t2147483647\tSID\tabc12345", norm)
+        self.assertIn(".google.com\tTRUE\t/\tTRUE\t2147483647\tSID\tabc12345", norm)
+
+    def test_settings_dialog_has_cookies_ui(self) -> None:
+        settings_source = (ROOT / "settings_ui.py").read_text(encoding="utf-8")
+        self.assertIn("cookies_toggle", settings_source)
+        self.assertIn("cookies_card", settings_source)
+        self.assertIn("cookies_edit", settings_source)
+        self.assertIn("normalize_cookie_content", settings_source)
+        self.assertIn("_show_cookie_help", settings_source)
+
 
 if __name__ == "__main__":
     unittest.main()

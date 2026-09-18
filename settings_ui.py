@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import os
+from pathlib import Path
+import tempfile
 import time
 
 from PyQt6.QtCore import Qt, QTimer
@@ -288,7 +291,7 @@ class SettingsDialog(_StyledDialog):
         super().__init__("Clock/Alarm 设置", parent)
         self.state = state
         self.save_state = save_state
-        self.resize(580, 680)
+        self.resize(600, 700)
 
         main_layout = QVBoxLayout(self)
         main_layout.setSpacing(12)
@@ -364,7 +367,11 @@ class SettingsDialog(_StyledDialog):
         layout.addWidget(cleaner_group)
 
         media_group = QGroupBox("视频播放器")
-        media_form = QFormLayout(media_group)
+        media_layout = QVBoxLayout(media_group)
+        media_layout.setSpacing(8)
+
+        media_form = QFormLayout()
+        media_form.setContentsMargins(0, 0, 0, 0)
         self.allow_online = QCheckBox("允许解析在线视频链接 and YouTube")
         self.allow_online.setChecked(bool(media_cfg.get("allow_online", True)))
         media_form.addRow(self.allow_online)
@@ -375,6 +382,114 @@ class SettingsDialog(_StyledDialog):
         )
         self.playlist_limit.setSuffix(" 项")
         media_form.addRow("单次播放列表上限", self.playlist_limit)
+        media_layout.addLayout(media_form)
+
+        # Collapsible YouTube Cookies Configuration
+        self.cookies_toggle = QCheckBox("配置 YouTube 登录 Cookies (解决 429 人机验证 / 会员视频)")
+        existing_cookies = str(media_cfg.get("cookies_text") or "")
+        if not existing_cookies:
+            try:
+                local_appdata = os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()
+                c_file = Path(local_appdata) / "ClockAlarm" / "cookies.txt"
+                if c_file.is_file():
+                    existing_cookies = c_file.read_text(encoding="utf-8", errors="replace").strip()
+            except Exception:
+                pass
+        self.cookies_toggle.setChecked(bool(existing_cookies))
+        self.cookies_toggle.setToolTip("开启后，播放器将以您的 Google/YouTube 登录身份请求视频流，彻底消除 429 人机拦截")
+        media_layout.addWidget(self.cookies_toggle)
+
+        self.cookies_card = QWidget()
+        self.cookies_card.setObjectName("cookies_card")
+        self.cookies_card.setStyleSheet(
+            """
+            QWidget#cookies_card {
+                background: #1e293b;
+                border: 1px solid #334155;
+                border-radius: 8px;
+            }
+            """
+        )
+        card_vbox = QVBoxLayout(self.cookies_card)
+        card_vbox.setContentsMargins(10, 8, 10, 8)
+        card_vbox.setSpacing(6)
+
+        card_tip = QLabel("💡 从浏览器导出或抓包复制 YouTube Cookie 粘贴于此。播放器将以您的账号身份解析，消除 429 人机拦截。")
+        card_tip.setWordWrap(True)
+        card_tip.setStyleSheet("color: #94a3b8; font-size: 11px;")
+        card_vbox.addWidget(card_tip)
+
+        self.cookies_edit = QPlainTextEdit()
+        self.cookies_edit.setFixedHeight(100)
+        self.cookies_edit.setPlaceholderText(
+            "在此粘贴 Cookies，支持以下格式：\n"
+            "1. Netscape cookies.txt 格式（推荐，使用浏览器插件导出）\n"
+            "2. F12 抓包复制的 'Cookie: SID=...; __Secure-3PSID=...' 请求头文本\n"
+            "3. EditThisCookie 导出的 JSON 格式"
+        )
+        self.cookies_edit.setStyleSheet(
+            """
+            QPlainTextEdit {
+                background: #0f172a;
+                color: #f1f5f9;
+                border: 1px solid #334155;
+                border-radius: 6px;
+                font-family: Consolas, 'Courier New', monospace;
+                font-size: 11px;
+                padding: 4px 6px;
+            }
+            QPlainTextEdit:focus {
+                border: 1px solid #38bdf8;
+            }
+            """
+        )
+        self.cookies_edit.setPlainText(existing_cookies)
+        card_vbox.addWidget(self.cookies_edit)
+
+        # Status and Action Buttons Row
+        status_btn_row = QHBoxLayout()
+        status_btn_row.setContentsMargins(0, 0, 0, 0)
+        status_btn_row.setSpacing(6)
+
+        self.lbl_cookie_status = QLabel("")
+        status_btn_row.addWidget(self.lbl_cookie_status, 1)
+
+        self.btn_cookie_import = QPushButton("📁 导入文件…")
+        self.btn_cookie_import.setFixedHeight(26)
+        self.btn_cookie_import.setToolTip("从本地选择导出的 cookies.txt 或 json 文件直接导入")
+        self.btn_cookie_import.setStyleSheet(
+            "QPushButton { background: #334155; color: #cbd5e1; border: 1px solid #475569; border-radius: 4px; padding: 0 8px; font-size: 11px; }"
+            "QPushButton:hover { background: #475569; color: #ffffff; border-color: #64748b; }"
+        )
+        self.btn_cookie_import.clicked.connect(self._import_cookie_file)
+        status_btn_row.addWidget(self.btn_cookie_import)
+
+        self.btn_cookie_clear = QPushButton("🗑️ 清空")
+        self.btn_cookie_clear.setFixedHeight(26)
+        self.btn_cookie_clear.setStyleSheet(
+            "QPushButton { background: #334155; color: #cbd5e1; border: 1px solid #475569; border-radius: 4px; padding: 0 8px; font-size: 11px; }"
+            "QPushButton:hover { background: #dc2626; color: #ffffff; border-color: #ef4444; }"
+        )
+        self.btn_cookie_clear.clicked.connect(lambda: self.cookies_edit.setPlainText(""))
+        status_btn_row.addWidget(self.btn_cookie_clear)
+
+        self.btn_cookie_help = QPushButton("❓ 提取教程")
+        self.btn_cookie_help.setFixedHeight(26)
+        self.btn_cookie_help.setStyleSheet(
+            "QPushButton { background: #334155; color: #38bdf8; border: 1px solid #0284c7; border-radius: 4px; padding: 0 8px; font-size: 11px; font-weight: 600; }"
+            "QPushButton:hover { background: #0284c7; color: #ffffff; }"
+        )
+        self.btn_cookie_help.clicked.connect(self._show_cookie_help)
+        status_btn_row.addWidget(self.btn_cookie_help)
+
+        card_vbox.addLayout(status_btn_row)
+
+        self.cookies_card.setVisible(self.cookies_toggle.isChecked())
+        self.cookies_toggle.toggled.connect(self.cookies_card.setVisible)
+        self.cookies_edit.textChanged.connect(self._update_cookie_status_ui)
+        self._update_cookie_status_ui()
+
+        media_layout.addWidget(self.cookies_card)
         layout.addWidget(media_group)
 
         # Screenshot & Clipboard Section
@@ -661,6 +776,26 @@ class SettingsDialog(_StyledDialog):
         media = self.state.setdefault("media", {})
         media["allow_online"] = self.allow_online.isChecked()
         media["playlist_limit"] = int(self.playlist_limit.value())
+        cookies_text = self.cookies_edit.toPlainText().strip() if self.cookies_toggle.isChecked() else ""
+        media["cookies_text"] = cookies_text
+
+        # Synchronize cookies to local disk for yt-dlp
+        try:
+            local_appdata = os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()
+            cookie_file = Path(local_appdata) / "ClockAlarm" / "cookies.txt"
+            if cookies_text:
+                from media_player_ui import normalize_cookie_content
+                normalized = normalize_cookie_content(cookies_text)
+                cookie_file.parent.mkdir(parents=True, exist_ok=True)
+                cookie_file.write_text(normalized, encoding="utf-8")
+            else:
+                if cookie_file.is_file():
+                    try:
+                        cookie_file.unlink()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
         # Save Screenshot configuration
         screenshot_cfg = self.state.setdefault("screenshot", {})
@@ -747,6 +882,68 @@ class SettingsDialog(_StyledDialog):
         prefs = self.state.setdefault("prefs", {})
         prefs["ignored_update_version"] = version
         self.save_state()
+
+    def _update_cookie_status_ui(self) -> None:
+        text = self.cookies_edit.toPlainText().strip()
+        if not text:
+            self.lbl_cookie_status.setText("状态：未配置")
+            self.lbl_cookie_status.setStyleSheet("color: #94a3b8; font-size: 11px;")
+            return
+
+        has_login = any(k in text for k in ("LOGIN_INFO", "SSID", "SAPISID", "SID", "APISID", "__Secure-3PSID"))
+        valid_lines = [l for l in text.splitlines() if l.strip() and not l.strip().startswith("#")]
+        if has_login:
+            self.lbl_cookie_status.setText("状态：已配置有效登录凭据")
+            self.lbl_cookie_status.setStyleSheet("color: #34d399; font-size: 11px; font-weight: 600;")
+        else:
+            self.lbl_cookie_status.setText(f"状态：已填入内容 ({len(valid_lines)} 条)")
+            self.lbl_cookie_status.setStyleSheet("color: #38bdf8; font-size: 11px;")
+
+    def _import_cookie_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择导出的 YouTube Cookies 文件",
+            "",
+            "Cookie 文件 (*.txt *.json);;文本文件 (*.txt);;所有文件 (*.*)",
+        )
+        if not path:
+            return
+        try:
+            content = Path(path).read_text(encoding="utf-8", errors="replace")
+            self.cookies_edit.setPlainText(content)
+            self.cookies_toggle.setChecked(True)
+        except Exception as exc:
+            QMessageBox.warning(self, "导入失败", f"无法读取该文件: {exc}")
+
+    def _show_cookie_help(self) -> None:
+        help_text = (
+            "<h3>YouTube Cookies 提取与配置指南</h3>"
+            "<p>当网络节点被 YouTube 拦截出现 <b>429 / Sign in to confirm you're not a bot</b> 提示时，"
+            "配置浏览器的 YouTube 登录 Cookies 可以让播放器以您的真实登录身份请求视频流，<b>彻底消除 429 人机拦截</b>，并可播放会员及受限视频。</p>"
+            "<hr style='border: none; border-top: 1px solid #334155; margin: 10px 0;'>"
+            "<p><b>方法一：使用 Chrome / Edge 扩展一键导出（推荐）</b></p>"
+            "<ol style='margin-left: -15px;'>"
+            "<li>在 Chrome / Edge 应用商店安装 <code>Get cookies.txt LOCALLY</code> 或 <code>Cookie-Editor</code> 扩展。</li>"
+            "<li>在浏览器中登录 <a href='https://www.youtube.com' style='color:#38bdf8;'>youtube.com</a>。</li>"
+            "<li>点击该扩展图标，选择 <b>Export / 导出</b> (Netscape 格式)。</li>"
+            "<li>点击本界面的 <b>[ 📁 导入文件… ]</b> 或直接将文本粘贴到输入框中。</li>"
+            "</ol>"
+            "<p><b>方法二：浏览器开发者工具 F12 抓包复制（免插件）</b></p>"
+            "<ol style='margin-left: -15px;'>"
+            "<li>在浏览器中登录 <a href='https://www.youtube.com' style='color:#38bdf8;'>youtube.com</a>。</li>"
+            "<li>按 <b>F12</b> 打开开发者工具，切换到 <b>Network（网络）</b> 标签页。</li>"
+            "<li>刷新网页，在请求列表中点击任意一个发往 youtube.com 的请求（例如 <code>browse</code> 或 <code>log_event</code>）。</li>"
+            "<li>在右侧 Headers 找到 <code>Cookie:</code>，复制其后的整段文本。</li>"
+            "<li>直接粘贴到本软件的文本框即可（软件会自动解析为标准 Netscape 格式）。</li>"
+            "</ol>"
+            "<p style='color: #94a3b8; font-size: 11px;'>注：Cookies 仅保存在本机用于向 YouTube 获取流媒体直链，绝不上传至任何第三方服务器。</p>"
+        )
+        msg = QMessageBox(self)
+        msg.setWindowTitle("如何获取 YouTube Cookies")
+        msg.setTextFormat(Qt.TextFormat.RichText)
+        msg.setText(help_text)
+        msg.setIcon(QMessageBox.Icon.Information)
+        msg.exec()
 
     def _import_sharex_settings(self, info: dict) -> None:
         if info.get("folder_id"):
