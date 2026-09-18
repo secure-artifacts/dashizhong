@@ -78,16 +78,19 @@ def capture_virtual_desktop() -> tuple[QPixmap, QRect]:
     """Grab entire virtual desktop. Returns (pixmap, geometry in global coords)."""
     geo = virtual_desktop_geometry()
     if mss is not None:
-        with mss.mss() as sct:
-            mon = sct.monitors[0]  # all monitors
-            shot = sct.grab(mon)
-            # BGRA -> RGBA
-            arr = np.frombuffer(shot.raw, dtype=np.uint8).reshape(shot.height, shot.width, 4).copy()
-            # mss is BGRA
-            rgba = arr[:, :, [2, 1, 0, 3]].copy()
-            img = QImage(rgba.data, shot.width, shot.height, shot.width * 4, QImage.Format.Format_RGBA8888).copy()
-            left, top = mon["left"], mon["top"]
-            return QPixmap.fromImage(img), QRect(left, top, shot.width, shot.height)
+        try:
+            with mss.mss() as sct:
+                mon = sct.monitors[0]  # all monitors
+                shot = sct.grab(mon)
+                # BGRA -> RGBA
+                arr = np.frombuffer(shot.raw, dtype=np.uint8).reshape(shot.height, shot.width, 4).copy()
+                # mss is BGRA
+                rgba = arr[:, :, [2, 1, 0, 3]].copy()
+                img = QImage(rgba.data, shot.width, shot.height, shot.width * 4, QImage.Format.Format_RGBA8888).copy()
+                left, top = mon["left"], mon["top"]
+                return QPixmap.fromImage(img), QRect(left, top, shot.width, shot.height)
+        except Exception:
+            pass
     # Fallback: Qt primary / stitched screens
     screens = QGuiApplication.screens()
     if not screens:
@@ -152,6 +155,7 @@ DOCK_ACTION_ROW: list[tuple[str, str, str, str]] = [
     ("redo", "redo", "重做", "action"),
     ("reselect", "reselect", "重选区域", "action"),
     ("copy", "copy", "复制", "action"),
+    ("upload", "upload", "上传到 Google Drive", "action"),
     ("pin", "pin", "钉住", "action"),
     ("accept", "accept", "完成", "action"),
     ("cancel", "cancel", "取消", "action"),
@@ -296,12 +300,18 @@ class ScreenshotEditor(QWidget):
         desk_geo: QRect,
         *,
         cfg: dict | None = None,
+        state: dict | None = None,
+        notify_callback: Callable[[str, str, bool], None] | None = None,
+        host=None,
         parent=None,
     ):
         super().__init__(parent)
         self.bg = bg
         self.desk_geo = desk_geo
         self.cfg = cfg if isinstance(cfg, dict) else {}
+        self.state = state if isinstance(state, dict) else {}
+        self.notify_callback = notify_callback
+        self.host = host
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
@@ -854,6 +864,20 @@ class ScreenshotEditor(QWidget):
             p.drawRoundedRect(cx - 4, cy - 9, 8, 6, 2, 2)
             p.drawLine(cx - 3, cy + 1, cx + 3, cy + 1)
             p.drawLine(cx - 3, cy + 5, cx + 3, cy + 5)
+        elif icon_id == "upload":
+            p.setPen(QPen(fg, 1.8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            cloud = QPainterPath()
+            cloud.moveTo(cx - 8, cy + 3)
+            cloud.lineTo(cx + 8, cy + 3)
+            cloud.arcTo(cx + 2, cy - 4, 8, 8, -90, 160)
+            cloud.arcTo(cx - 5, cy - 8, 10, 10, 0, 180)
+            cloud.arcTo(cx - 10, cy - 3, 7, 7, 80, 150)
+            cloud.closeSubpath()
+            p.drawPath(cloud)
+            p.drawLine(cx, cy + 1, cx, cy - 4)
+            p.drawLine(cx - 3, cy - 1, cx, cy - 4)
+            p.drawLine(cx + 3, cy - 1, cx, cy - 4)
         elif icon_id == "save":
             p.drawRoundedRect(cx - 8, cy - 8, 16, 16, 2, 2)
             p.drawRect(cx - 4, cy - 8, 8, 6)
@@ -1771,6 +1795,9 @@ class ScreenshotEditor(QWidget):
             _PINNED_REFS.append(pin)
             self._finish_ok(img)
             return
+        if act == "upload":
+            self._upload_to_gdrive(img)
+            return
         if act == "accept":
             # auto copy + conditional auto save then exit
             try:
@@ -1782,8 +1809,78 @@ class ScreenshotEditor(QWidget):
             self._finish_ok(img)
             return
 
-# Keep pinned windows alive
+    def _upload_to_gdrive(self, img: QImage) -> None:
+        try:
+            from gdrive_uploader import (
+                GoogleDriveAuthManager,
+                GoogleDriveUploadWorker,
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "Google Drive", f"加载上传模块失败：{exc}")
+            return
+
+        gdrive_cfg = self.cfg.get("gdrive", {})
+        if not gdrive_cfg and isinstance(self.state, dict):
+            gdrive_cfg = self.state.get("screenshot", {}).get("gdrive", {})
+
+        creds = gdrive_cfg.get("credentials") or {}
+        if not creds or (not creds.get("refresh_token") and not creds.get("access_token")):
+            reply = QMessageBox.question(
+                self,
+                "Google Drive 尚未授权",
+                "您尚未在软件中授权绑定 Google Drive 账号。\n\n是否立即打开设置页面完成 Google 账号授权？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                self._finish_ok(img)
+                if self.host and hasattr(self.host, "show_settings_dialog"):
+                    self.host.show_settings_dialog()
+            return
+
+        full_state = self.state if isinstance(self.state, dict) else {"screenshot": self.cfg}
+        worker = GoogleDriveUploadWorker(img, state=full_state)
+        _ACTIVE_WORKERS.append(worker)
+
+        notify_cb = self.notify_callback
+
+        def _on_success(result: dict) -> None:
+            if worker in _ACTIVE_WORKERS:
+                _ACTIVE_WORKERS.remove(worker)
+            link = result.get("web_view_link", "")
+            if notify_cb:
+                notify_cb(
+                    "Google Drive 上传成功",
+                    f"截图已成功上传并生成公开预览链接！\n已自动复制到剪贴板：\n{link}",
+                    True,
+                )
+            else:
+                QMessageBox.information(
+                    None,
+                    "Google Drive 上传成功",
+                    f"截图已成功上传并生成公开预览链接！\n\n已自动复制到剪贴板：\n{link}",
+                )
+
+        def _on_failed(err_msg: str) -> None:
+            if worker in _ACTIVE_WORKERS:
+                _ACTIVE_WORKERS.remove(worker)
+            if notify_cb:
+                notify_cb("Google Drive 上传失败", err_msg, False)
+            else:
+                QMessageBox.warning(None, "Google Drive 上传失败", err_msg)
+
+        worker.upload_success.connect(_on_success)
+        worker.upload_failed.connect(_on_failed)
+        worker.start()
+
+        if notify_cb:
+            notify_cb("Google Drive", "正在后台上传截图至 Google Drive，完成后将自动复制链接…", True)
+
+        self._finish_ok(img)
+
+# Keep pinned windows and background upload workers alive
 _PINNED_REFS: list[PinnedShot] = []
+_ACTIVE_WORKERS: list[Any] = []
 _EDITOR_REF: ScreenshotEditor | None = None
 
 
@@ -1791,6 +1888,8 @@ def start_screenshot(
     *,
     state: dict | None = None,
     on_done: Callable[[QImage | None], None] | None = None,
+    notify_callback: Callable[[str, str, bool], None] | None = None,
+    host: Any = None,
 ) -> ScreenshotEditor | None:
     """Launch the region-selection capture and annotation editor."""
     global _EDITOR_REF
@@ -1807,7 +1906,14 @@ def start_screenshot(
         global _EDITOR_REF
         try:
             background, geometry = capture_virtual_desktop()
-            editor = ScreenshotEditor(background, geometry, cfg=cfg)
+            editor = ScreenshotEditor(
+                background,
+                geometry,
+                cfg=cfg,
+                state=state,
+                notify_callback=notify_callback,
+                host=host,
+            )
         except Exception as exc:
             if on_done:
                 on_done(None)
@@ -1834,5 +1940,5 @@ def start_screenshot(
             editor.close()
             QMessageBox.warning(None, "截图失败", str(exc))
 
-    QTimer.singleShot(120, _run)
+    QTimer.singleShot(10, _run)
     return None

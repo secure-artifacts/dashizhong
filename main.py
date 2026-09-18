@@ -140,6 +140,26 @@ class ClockAlarmApp(QObject):
         if (self.store.state.get("prefs") or {}).get("check_updates", True):
             QTimer.singleShot(4000, lambda: self.check_for_updates(interactive=False))
 
+        # 启动就绪后异步预热截图依赖模块（numpy, PIL, mss, screenshot_app），彻底消除首次按快捷键时的卡顿
+        QTimer.singleShot(800, self._prewarm_screenshot)
+
+    def _prewarm_screenshot(self) -> None:
+        """Asynchronously pre-warm screenshot modules in background thread after startup."""
+        import threading
+
+        def _worker() -> None:
+            try:
+                import numpy  # noqa: F401
+                import PIL.Image  # noqa: F401
+                import mss  # noqa: F401
+                import screenshot_app  # noqa: F401
+                import gdrive_uploader  # noqa: F401
+            except Exception:
+                pass
+
+        t = threading.Thread(target=_worker, daemon=True, name="ScreenshotPrewarm")
+        t.start()
+
     def _cb(self) -> SimpleNamespace:
         return SimpleNamespace(
             save_state=self.store.save_state,
@@ -226,10 +246,20 @@ class ClockAlarmApp(QObject):
                     pass
             hidden_windows.clear()
 
+        def notify_user(title: str, msg: str, is_info: bool = True) -> None:
+            if getattr(self, "tray", None):
+                icon = QSystemTrayIcon.MessageIcon.Information if is_info else QSystemTrayIcon.MessageIcon.Warning
+                self.tray.showMessage(title, msg, icon, 8000)
+
         def launch() -> None:
             try:
                 from screenshot_app import start_screenshot
-                start_screenshot(state=self.store.state, on_done=restore_windows)
+                start_screenshot(
+                    state=self.store.state,
+                    on_done=restore_windows,
+                    notify_callback=notify_user,
+                    host=self,
+                )
             except Exception as exc:
                 restore_windows()
                 QMessageBox.warning(None, "截图失败", str(exc))
@@ -239,7 +269,7 @@ class ClockAlarmApp(QObject):
                 if window.isVisible():
                     hidden_windows.append(window)
                     window.hide()
-            QTimer.singleShot(200, launch)
+            QTimer.singleShot(30, launch)
         except Exception as exc:
             restore_windows()
             QMessageBox.warning(None, "截图失败", str(exc))
