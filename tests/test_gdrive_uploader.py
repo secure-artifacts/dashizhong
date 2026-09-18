@@ -231,6 +231,58 @@ class GoogleDriveUploaderTests(unittest.TestCase):
         self.assertFalse(toast._timer.isActive())
         toast.close()
 
+    def test_gdrive_credentials_persistence_across_restarts(self):
+        from storage import JsonStore, DEFAULT_STATE
+        saved_state = {
+            "screenshot": {
+                "gdrive": {
+                    "is_public": True,
+                    "folder_id": "test_folder_id_123",
+                    "credentials": {
+                        "access_token": "token_abc",
+                        "refresh_token": "refresh_def",
+                        "email": "user@gmail.com",
+                    },
+                },
+                "auto_upload": True,  # should be dropped as legacy
+            }
+        }
+        cleaned = JsonStore._drop_legacy_state(saved_state)
+        # Verify legacy auto_upload was dropped, but gdrive was KEPT!
+        self.assertNotIn("auto_upload", cleaned["screenshot"])
+        self.assertIn("gdrive", cleaned["screenshot"])
+        self.assertEqual(
+            cleaned["screenshot"]["gdrive"]["credentials"]["email"],
+            "user@gmail.com",
+        )
+        self.assertEqual(
+            cleaned["screenshot"]["gdrive"]["folder_id"],
+            "test_folder_id_123",
+        )
+
+    def test_screenshot_editor_modality_and_no_tool_flag(self):
+        from PyQt6.QtCore import Qt, QRect
+        from PyQt6.QtGui import QPixmap
+        pm = QPixmap(100, 100)
+        editor = ScreenshotEditor(pm, QRect(0, 0, 100, 100))
+        # Ensure it has ApplicationModal so modal dialogs don't block screenshotting
+        self.assertEqual(editor.windowModality(), Qt.WindowModality.ApplicationModal)
+        # Ensure it is not a Tool window (Tool windows lose z-order to normal topmost windows)
+        self.assertNotEqual(
+            editor.windowFlags() & Qt.WindowType.WindowType_Mask,
+            Qt.WindowType.Tool,
+        )
+        editor.close()
+
+    def test_settings_dialog_modeless_in_main(self):
+        from pathlib import Path
+        source = Path(__file__).resolve().parents[1] / "main.py"
+        text = source.read_text(encoding="utf-8")
+        self.assertIn("dialog.setModal(False)", text)
+        self.assertIn("dialog.show()", text)
+        show_settings_code = text.split("def show_settings")[1].split("def start_deep_clean")[0]
+        self.assertNotIn(".exec()", show_settings_code)
+
 
 if __name__ == "__main__":
     unittest.main()

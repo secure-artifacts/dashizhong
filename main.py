@@ -218,7 +218,8 @@ class ClockAlarmApp(QObject):
     def _screenshot_windows(self) -> list[QWidget]:
         # Todo/notes controllers own multiple windows; they are not QWidgets.
         candidates = [self.world_clock_board, self.recorder_board,
-                      self.media_player_board, self.cleaner_progress_window]
+                      self.media_player_board, self.cleaner_progress_window,
+                      getattr(self, "_settings_dialog", None)]
         for controller in (self.todo_board, self.notes_ctl):
             if controller is not None:
                 candidates.extend(getattr(controller, "windows", {}).values())
@@ -493,12 +494,26 @@ class ClockAlarmApp(QObject):
     def show_settings(self) -> None:
         from settings_ui import SettingsDialog
 
+        if getattr(self, "_settings_dialog", None) is not None:
+            try:
+                if self._settings_dialog.isVisible():
+                    self._settings_dialog.showNormal()
+                    self._settings_dialog.raise_()
+                    self._settings_dialog.activateWindow()
+                    return
+            except Exception:
+                pass
+
         def save_and_rebind():
             self.store.save_state()
             self.hotkeys.rebuild()
 
         dialog = SettingsDialog(self.store.state, save_and_rebind)
-        dialog.exec()
+        self._settings_dialog = dialog
+        dialog.setModal(False)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def start_deep_clean(self, scopes: list[str] | None = None) -> None:
         if self._cleaning:

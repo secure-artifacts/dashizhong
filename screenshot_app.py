@@ -315,8 +315,8 @@ class ScreenshotEditor(QWidget):
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
-            | Qt.WindowType.Tool
         )
+        self.setWindowModality(Qt.WindowModality.ApplicationModal)
         self.setMouseTracking(True)
         self.setCursor(Qt.CursorShape.CrossCursor)
         self.setGeometry(desk_geo)
@@ -1898,6 +1898,26 @@ def start_screenshot(
             on_done(None)
         return None
 
+    # Break any lingering popup menu or modal mouse capture before screenshotting
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.user32.ReleaseCapture()
+        except Exception:
+            pass
+    try:
+        grabber = QWidget.mouseGrabber()
+        if grabber is not None:
+            grabber.releaseMouse()
+        kb_grabber = QWidget.keyboardGrabber()
+        if kb_grabber is not None:
+            kb_grabber.releaseKeyboard()
+        popup = QApplication.activePopupWidget()
+        if popup is not None:
+            popup.close()
+    except Exception:
+        pass
+
     def _run() -> None:
         global _EDITOR_REF
         try:
@@ -1932,6 +1952,17 @@ def start_screenshot(
             editor.raise_()
             editor.activateWindow()
             editor.setFocus()
+            if sys.platform == "win32":
+                try:
+                    import ctypes
+                    hwnd = int(editor.winId())
+                    user32 = ctypes.windll.user32
+                    user32.SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0040)
+                    user32.SetForegroundWindow(hwnd)
+                    user32.SetActiveWindow(hwnd)
+                    user32.BringWindowToTop(hwnd)
+                except Exception:
+                    pass
         except Exception as exc:
             editor.close()
             QMessageBox.warning(None, "截图失败", str(exc))

@@ -25,6 +25,14 @@ DEFAULT_STATE: dict[str, Any] = {
     "screenshot": {
         "save_dir": "",
         "hotkey_region": "Ctrl+Alt+A",
+        "hide_windows": False,
+        "gdrive": {
+            "is_public": True,
+            "direct_link": False,
+            "use_folder": True,
+            "folder_id": "",
+            "credentials": {},
+        },
     },
     "recorder": {},
     "cleaner": {
@@ -119,7 +127,7 @@ class JsonStore:
 
         screenshot = state.get("screenshot")
         if isinstance(screenshot, dict):
-            for key in ("auto_upload", "hotkey_full", "gdrive"):
+            for key in ("auto_upload", "hotkey_full"):
                 screenshot.pop(key, None)
 
         cleaner = state.get("cleaner")
