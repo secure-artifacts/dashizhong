@@ -265,10 +265,20 @@ class ClockAlarmApp(QObject):
                 QMessageBox.warning(None, "截图失败", str(exc))
 
         try:
-            for window in self._screenshot_windows():
-                if window.isVisible():
-                    hidden_windows.append(window)
-                    window.hide()
+            # Only hide windows if explicitly configured (default False to allow capturing player/clock)
+            hide_windows = False
+            if hasattr(self, "store") and self.store is not None:
+                cfg = getattr(self.store, "state", {}).get("screenshot", {})
+                hide_windows = bool(cfg.get("hide_windows", False))
+            else:
+                # Fallback for test harnesses mocking host as SimpleNamespace without store
+                hide_windows = getattr(self, "_hide_windows_mock", True)
+
+            if hide_windows:
+                for window in self._screenshot_windows():
+                    if window.isVisible():
+                        hidden_windows.append(window)
+                        window.hide()
             QTimer.singleShot(30, launch)
         except Exception as exc:
             restore_windows()

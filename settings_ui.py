@@ -389,6 +389,11 @@ class SettingsDialog(_StyledDialog):
         self.screenshot_auto_save = QCheckBox("截图完成后自动保存图片到本地")
         self.screenshot_auto_save.setChecked(bool(screenshot_cfg.get("auto_save", True)))
         screenshot_form.addRow(self.screenshot_auto_save)
+
+        self.screenshot_hide_windows = QCheckBox("截图时自动隐藏本软件的窗口 (如播放器、时钟等)")
+        self.screenshot_hide_windows.setChecked(bool(screenshot_cfg.get("hide_windows", False)))
+        self.screenshot_hide_windows.setToolTip("默认不勾选（截图时保留播放器、时钟等窗口可见，方便直接截取本软件内容）；勾选后将在截图前自动隐藏本软件的所有窗口。")
+        screenshot_form.addRow(self.screenshot_hide_windows)
         
         dir_widget = QWidget()
         dir_layout = QHBoxLayout(dir_widget)
@@ -661,6 +666,7 @@ class SettingsDialog(_StyledDialog):
         screenshot_cfg = self.state.setdefault("screenshot", {})
         screenshot_cfg["auto_copy"] = self.screenshot_auto_copy.isChecked()
         screenshot_cfg["auto_save"] = self.screenshot_auto_save.isChecked()
+        screenshot_cfg["hide_windows"] = self.screenshot_hide_windows.isChecked()
         save_dir_text = self.screenshot_save_dir.text().strip()
         if save_dir_text:
             screenshot_cfg["save_dir"] = save_dir_text

@@ -53,6 +53,22 @@ class ScreenshotWindowTests(unittest.TestCase):
         timer.singleShot.assert_called_once()
         self.assertFalse(window.visible)
 
+    def test_start_screenshot_region_does_not_hide_windows_when_hide_windows_is_false(self):
+        window = self.Window()
+        store = SimpleNamespace(state={"screenshot": {"hide_windows": False}})
+        host = SimpleNamespace(
+            store=store,
+            _screenshot_active=False,
+            _screenshot_windows=lambda: [window],
+        )
+        timer = Mock()
+        start = method('main.py', 'ClockAlarmApp', 'start_screenshot_region',
+                       QTimer=timer, QMessageBox=Mock())
+        start(host)
+        timer.singleShot.assert_called_once()
+        # Window must remain visible so user can screenshot the player/clock
+        self.assertTrue(window.visible)
+
 
 class CleanerProgressTests(unittest.TestCase):
     def test_progress_reports_incremental_counts_from_isolated_files(self):
