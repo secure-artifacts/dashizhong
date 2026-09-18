@@ -43,6 +43,8 @@ a = Analysis(
         "PyQt6.QtMultimedia",
         "PyQt6.QtMultimediaWidgets",
         "PyQt6.QtNetwork",
+        "gdrive_uploader",
+        "requests",
     ],
     hookspath=[],
     hooksconfig={},

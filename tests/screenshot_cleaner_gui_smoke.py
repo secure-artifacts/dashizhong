@@ -66,7 +66,7 @@ def main():
     host._cleaning = False
     host.cleaner_progress_window = None
     logs, notifications = [], []
-    host.store = SimpleNamespace(state={'screenshot': {'auto_save': False}},
+    host.store = SimpleNamespace(state={'screenshot': {'auto_save': False, 'hide_windows': True}},
                                  append_log=lambda *args: logs.append(args))
     host.tray = SimpleNamespace(showMessage=lambda *args: notifications.append(args))
     windows = [QWidget() for _ in range(6)]
