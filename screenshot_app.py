@@ -1814,6 +1814,7 @@ class ScreenshotEditor(QWidget):
             from gdrive_uploader import (
                 GoogleDriveAuthManager,
                 GoogleDriveUploadWorker,
+                UploadNotificationToast,
             )
         except Exception as exc:
             QMessageBox.warning(self, "Google Drive", f"加载上传模块失败：{exc}")
@@ -1842,39 +1843,34 @@ class ScreenshotEditor(QWidget):
         worker = GoogleDriveUploadWorker(img, state=full_state)
         _ACTIVE_WORKERS.append(worker)
 
+        # Show desktop notification popup immediately
+        toast = UploadNotificationToast(parent=None)
+        toast.show_uploading()
+
         notify_cb = self.notify_callback
 
         def _on_success(result: dict) -> None:
             if worker in _ACTIVE_WORKERS:
                 _ACTIVE_WORKERS.remove(worker)
-            link = result.get("web_view_link", "")
+            link = result.get("share_url") or result.get("web_view_link", "")
+            toast.show_success(link)
             if notify_cb:
                 notify_cb(
                     "Google Drive 上传成功",
                     f"截图已成功上传并生成公开预览链接！\n已自动复制到剪贴板：\n{link}",
                     True,
                 )
-            else:
-                QMessageBox.information(
-                    None,
-                    "Google Drive 上传成功",
-                    f"截图已成功上传并生成公开预览链接！\n\n已自动复制到剪贴板：\n{link}",
-                )
 
         def _on_failed(err_msg: str) -> None:
             if worker in _ACTIVE_WORKERS:
                 _ACTIVE_WORKERS.remove(worker)
+            toast.show_error(err_msg)
             if notify_cb:
                 notify_cb("Google Drive 上传失败", err_msg, False)
-            else:
-                QMessageBox.warning(None, "Google Drive 上传失败", err_msg)
 
         worker.upload_success.connect(_on_success)
         worker.upload_failed.connect(_on_failed)
         worker.start()
-
-        if notify_cb:
-            notify_cb("Google Drive", "正在后台上传截图至 Google Drive，完成后将自动复制链接…", True)
 
         self._finish_ok(img)
 

@@ -18,8 +18,20 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 
 import requests
-from PyQt6.QtCore import QBuffer, QIODevice, QObject, QThread, pyqtSignal
-from PyQt6.QtGui import QGuiApplication, QImage
+import requests.adapters
+from PyQt6.QtCore import QBuffer, QIODevice, QObject, QThread, QTimer, Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QGuiApplication, QImage
+from PyQt6.QtWidgets import (
+    QDialog,
+    QFrame,
+    QGraphicsDropShadowEffect,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -386,6 +398,25 @@ class GoogleDriveAuthManager(QObject):
             return False
 
 
+_DRIVE_SESSION: requests.Session | None = None
+
+
+def get_drive_session() -> requests.Session:
+    """Returns a pooled HTTP session to reuse TLS connections across requests."""
+    global _DRIVE_SESSION
+    if _DRIVE_SESSION is None:
+        _DRIVE_SESSION = requests.Session()
+        try:
+            adapter = requests.adapters.HTTPAdapter(
+                pool_connections=5, pool_maxsize=10, max_retries=1
+            )
+            _DRIVE_SESSION.mount("https://", adapter)
+            _DRIVE_SESSION.mount("http://", adapter)
+        except Exception:
+            pass
+    return _DRIVE_SESSION
+
+
 class GoogleDriveUploader:
     """Handles file uploading to Google Drive and setting public reader permissions."""
 
@@ -397,6 +428,7 @@ class GoogleDriveUploader:
         filename: str | None = None,
         is_public: bool = True,
         direct_link: bool = False,
+        session: requests.Session | None = None,
     ) -> dict:
         """Uploads PNG bytes using Google Drive v3 multipart upload.
         
@@ -436,7 +468,9 @@ class GoogleDriveUploader:
         }
 
         # 2. Upload file
-        resp = requests.post(DRIVE_UPLOAD_URL, headers=headers, data=body, timeout=30)
+        http_post = session.post if session else requests.post
+        upload_url = f"{DRIVE_UPLOAD_URL}&fields=id,name"
+        resp = http_post(upload_url, headers=headers, data=body, timeout=30)
         if resp.status_code not in (200, 201):
             err_detail = resp.text
             try:
@@ -450,12 +484,12 @@ class GoogleDriveUploader:
 
         # 3. Make file public (anyone: reader) if is_public is True
         if is_public:
-            perm_url = f"{DRIVE_FILES_URL}/{file_id}/permissions"
+            perm_url = f"{DRIVE_FILES_URL}/{file_id}/permissions?fields=id"
             perm_headers = {
                 "Authorization": f"Bearer {access_token}",
                 "Content-Type": "application/json",
             }
-            perm_resp = requests.post(
+            perm_resp = http_post(
                 perm_url,
                 headers=perm_headers,
                 json={"role": "reader", "type": "anyone"},
@@ -550,7 +584,10 @@ class GoogleDriveUploadWorker(QThread):
             if isinstance(self._image, QImage):
                 buf = QBuffer()
                 buf.open(QIODevice.OpenModeFlag.WriteOnly)
-                self._image.save(buf, "PNG")
+                img = self._image
+                if not img.hasAlphaChannel() and img.format() != QImage.Format.Format_RGB32:
+                    img = img.convertToFormat(QImage.Format.Format_RGB32)
+                img.save(buf, "PNG", 50)
                 png_bytes = bytes(buf.data())
             elif isinstance(self._image, (bytes, bytearray)):
                 png_bytes = bytes(self._image)
@@ -563,6 +600,7 @@ class GoogleDriveUploadWorker(QThread):
             is_public = bool(gdrive_cfg.get("is_public", True))
             direct_link = bool(gdrive_cfg.get("direct_link", False))
 
+            session = get_drive_session()
             result = GoogleDriveUploader.upload_png_bytes(
                 png_bytes=png_bytes,
                 access_token=token,
@@ -570,6 +608,7 @@ class GoogleDriveUploadWorker(QThread):
                 filename=self._filename,
                 is_public=is_public,
                 direct_link=direct_link,
+                session=session,
             )
 
             # Auto copy share link to clipboard
@@ -643,3 +682,288 @@ def copy_text_to_clipboard(text: str) -> bool:
             pass
 
     return success
+
+
+_ACTIVE_TOASTS: list[UploadNotificationToast] = []
+
+
+class UploadNotificationToast(QDialog):
+    """Floating desktop notification popup for Google Drive screenshot upload.
+
+    - Non-modal, frameless, stays on top, without stealing keyboard focus.
+    - Appears at the bottom-right corner of desktop (above taskbar).
+    - In success state, automatically counts down 5 seconds and closes.
+    - Hovering mouse pauses the 5-second countdown.
+    - Features [🌐 打开链接], [📋 复制链接], and [✕ 关闭] actions.
+    """
+
+    def __init__(self, parent: QObject | None = None) -> None:
+        super().__init__(None)
+        self._link: str = ""
+        self._countdown: int = 5
+        self._is_paused: bool = False
+
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.setFixedWidth(380)
+
+        # Card container
+        self.card = QFrame(self)
+        self.card.setObjectName("toastCard")
+        self.card.setStyleSheet("""
+            QFrame#toastCard {
+                background-color: #0f172a;
+                border: 1px solid #0284c7;
+                border-radius: 12px;
+            }
+            QLabel {
+                color: #e2e8f0;
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Microsoft YaHei", sans-serif;
+            }
+        """)
+
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(22)
+        shadow.setColor(QColor(0, 0, 0, 180))
+        shadow.setOffset(0, 4)
+        self.card.setGraphicsEffect(shadow)
+
+        card_layout = QVBoxLayout(self.card)
+        card_layout.setContentsMargins(16, 14, 16, 14)
+        card_layout.setSpacing(8)
+
+        # Header Row
+        header_row = QHBoxLayout()
+        header_row.setContentsMargins(0, 0, 0, 0)
+        header_row.setSpacing(8)
+
+        self.title_lbl = QLabel("☁️ 正在上传至 Google Drive...")
+        self.title_lbl.setStyleSheet("font-size: 13px; font-weight: 700; color: #38bdf8;")
+        header_row.addWidget(self.title_lbl)
+
+        header_row.addStretch(1)
+
+        self.timer_badge = QLabel("5s 自动关闭")
+        self.timer_badge.setStyleSheet(
+            "font-size: 11px; color: #94a3b8; background: rgba(148, 163, 184, 0.15); border-radius: 4px; padding: 2px 6px;"
+        )
+        self.timer_badge.setVisible(False)
+        header_row.addWidget(self.timer_badge)
+
+        self.close_btn = QPushButton("✕")
+        self.close_btn.setFixedSize(20, 20)
+        self.close_btn.setStyleSheet(
+            "QPushButton { background: transparent; color: #94a3b8; border: none; font-size: 12px; font-weight: bold; border-radius: 4px; }"
+            "QPushButton:hover { background: rgba(248, 113, 113, 0.2); color: #f87171; }"
+        )
+        self.close_btn.clicked.connect(self.close)
+        header_row.addWidget(self.close_btn)
+
+        card_layout.addLayout(header_row)
+
+        # Subtitle message
+        self.subtitle_lbl = QLabel("正在上传截图并生成公开直链，请稍候…")
+        self.subtitle_lbl.setWordWrap(True)
+        self.subtitle_lbl.setStyleSheet("font-size: 12px; color: #94a3b8; line-height: 1.4;")
+        card_layout.addWidget(self.subtitle_lbl)
+
+        # Link input box
+        self.link_edit = QLineEdit()
+        self.link_edit.setReadOnly(True)
+        self.link_edit.setStyleSheet(
+            "QLineEdit { background: #020617; color: #38bdf8; border: 1px solid #334155; border-radius: 6px; padding: 5px 8px; font-size: 11px; selection-background-color: #0284c7; }"
+        )
+        self.link_edit.setVisible(False)
+        card_layout.addWidget(self.link_edit)
+
+        # Buttons Row
+        self.btn_row_widget = QWidget()
+        btn_layout = QHBoxLayout(self.btn_row_widget)
+        btn_layout.setContentsMargins(0, 4, 0, 0)
+        btn_layout.setSpacing(8)
+
+        self.open_btn = QPushButton("🌐 打开链接")
+        self.open_btn.setFixedHeight(28)
+        self.open_btn.setStyleSheet(
+            "QPushButton { background-color: #0284c7; color: white; border: none; border-radius: 5px; padding: 0 12px; font-size: 12px; font-weight: 600; }"
+            "QPushButton:hover { background-color: #0369a1; }"
+        )
+        self.open_btn.clicked.connect(self._on_open_clicked)
+        btn_layout.addWidget(self.open_btn)
+
+        self.copy_btn = QPushButton("📋 复制链接")
+        self.copy_btn.setFixedHeight(28)
+        self.copy_btn.setStyleSheet(
+            "QPushButton { background-color: #1e293b; color: #e2e8f0; border: 1px solid #475569; border-radius: 5px; padding: 0 12px; font-size: 12px; font-weight: 600; }"
+            "QPushButton:hover { background-color: #334155; }"
+        )
+        self.copy_btn.clicked.connect(self._on_copy_clicked)
+        btn_layout.addWidget(self.copy_btn)
+
+        btn_layout.addStretch(1)
+
+        self.dismiss_btn = QPushButton("关闭")
+        self.dismiss_btn.setFixedHeight(28)
+        self.dismiss_btn.setStyleSheet(
+            "QPushButton { background-color: transparent; color: #94a3b8; border: none; border-radius: 5px; padding: 0 8px; font-size: 12px; }"
+            "QPushButton:hover { background-color: rgba(255, 255, 255, 0.08); color: #f1f5f9; }"
+        )
+        self.dismiss_btn.clicked.connect(self.close)
+        btn_layout.addWidget(self.dismiss_btn)
+
+        self.btn_row_widget.setVisible(False)
+        card_layout.addWidget(self.btn_row_widget)
+
+        # Outer layout
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(10, 10, 10, 10)
+        main_layout.addWidget(self.card)
+
+        # Auto-close timer
+        self._timer = QTimer(self)
+        self._timer.setInterval(1000)
+        self._timer.timeout.connect(self._on_tick)
+
+        if self not in _ACTIVE_TOASTS:
+            _ACTIVE_TOASTS.append(self)
+
+    def show_uploading(self) -> None:
+        self.title_lbl.setText("☁️ 正在上传至 Google Drive...")
+        self.title_lbl.setStyleSheet("font-size: 13px; font-weight: 700; color: #38bdf8;")
+        self.subtitle_lbl.setText("正在上传截图并生成公开直链，请稍候…")
+        self.timer_badge.setVisible(False)
+        self.link_edit.setVisible(False)
+        self.btn_row_widget.setVisible(False)
+        self.card.setStyleSheet("""
+            QFrame#toastCard {
+                background-color: #0f172a;
+                border: 1px solid #0284c7;
+                border-radius: 12px;
+            }
+            QLabel { color: #e2e8f0; }
+        """)
+        self._position_bottom_right()
+        self.show()
+
+    def show_success(self, link: str) -> None:
+        self._link = link
+        self.title_lbl.setText("🎉 截图已成功上传！")
+        self.title_lbl.setStyleSheet("font-size: 13px; font-weight: 700; color: #4ade80;")
+        self.subtitle_lbl.setText("公开直链已复制到剪贴板，可直接粘贴分享：")
+        self.link_edit.setText(link)
+        self.link_edit.setCursorPosition(0)
+        self.link_edit.setVisible(True)
+        self.btn_row_widget.setVisible(True)
+        self.open_btn.setVisible(True)
+        self.copy_btn.setVisible(True)
+        self.timer_badge.setVisible(True)
+        self.card.setStyleSheet("""
+            QFrame#toastCard {
+                background-color: #0f172a;
+                border: 1px solid #10b981;
+                border-radius: 12px;
+            }
+            QLabel { color: #e2e8f0; }
+        """)
+        self._countdown = 5
+        self._is_paused = False
+        self._update_countdown_label()
+        self._timer.start(1000)
+        self._position_bottom_right()
+        self.show()
+        self.raise_()
+
+    def show_error(self, err_msg: str) -> None:
+        self.title_lbl.setText("❌ 上传失败")
+        self.title_lbl.setStyleSheet("font-size: 13px; font-weight: 700; color: #f87171;")
+        self.subtitle_lbl.setText(err_msg)
+        self.link_edit.setVisible(False)
+        self.btn_row_widget.setVisible(True)
+        self.open_btn.setVisible(False)
+        self.copy_btn.setVisible(False)
+        self.timer_badge.setVisible(True)
+        self.card.setStyleSheet("""
+            QFrame#toastCard {
+                background-color: #0f172a;
+                border: 1px solid #ef4444;
+                border-radius: 12px;
+            }
+            QLabel { color: #e2e8f0; }
+        """)
+        self._countdown = 6
+        self._is_paused = False
+        self._update_countdown_label()
+        self._timer.start(1000)
+        self._position_bottom_right()
+        self.show()
+        self.raise_()
+
+    def _on_tick(self) -> None:
+        self._countdown -= 1
+        if self._countdown <= 0:
+            self._timer.stop()
+            self.close()
+        else:
+            self._update_countdown_label()
+
+    def _update_countdown_label(self) -> None:
+        if self._is_paused:
+            self.timer_badge.setText("已暂停")
+            self.timer_badge.setStyleSheet(
+                "font-size: 11px; color: #fbbf24; background: rgba(251, 191, 36, 0.15); border-radius: 4px; padding: 2px 6px;"
+            )
+        else:
+            self.timer_badge.setText(f"{self._countdown}s 自动关闭")
+            self.timer_badge.setStyleSheet(
+                "font-size: 11px; color: #94a3b8; background: rgba(148, 163, 184, 0.15); border-radius: 4px; padding: 2px 6px;"
+            )
+
+    def enterEvent(self, event) -> None:
+        self._is_paused = True
+        self._timer.stop()
+        self._update_countdown_label()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self._is_paused = False
+        if self._countdown > 0:
+            self._timer.start(1000)
+        self._update_countdown_label()
+        super().leaveEvent(event)
+
+    def _on_open_clicked(self) -> None:
+        if self._link:
+            webbrowser.open(self._link)
+        self.close()
+
+    def _on_copy_clicked(self) -> None:
+        if self._link:
+            copy_text_to_clipboard(self._link)
+            self.copy_btn.setText("已复制 ✓")
+            self.copy_btn.setStyleSheet(
+                "QPushButton { background-color: #059669; color: white; border: none; border-radius: 5px; padding: 0 12px; font-size: 12px; font-weight: 600; }"
+            )
+            QTimer.singleShot(1000, self.close)
+
+    def _position_bottom_right(self) -> None:
+        self.adjustSize()
+        scr = QGuiApplication.primaryScreen()
+        if scr:
+            geom = scr.availableGeometry()
+            x = geom.right() - self.width() - 16
+            y = geom.bottom() - self.height() - 16
+            self.move(x, y)
+
+    def closeEvent(self, event) -> None:
+        self._timer.stop()
+        if self in _ACTIVE_TOASTS:
+            try:
+                _ACTIVE_TOASTS.remove(self)
+            except ValueError:
+                pass
+        super().closeEvent(event)

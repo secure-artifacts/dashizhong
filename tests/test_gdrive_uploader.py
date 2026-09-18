@@ -173,6 +173,37 @@ class GoogleDriveUploaderTests(unittest.TestCase):
         from main import ClockAlarmApp
         self.assertTrue(hasattr(ClockAlarmApp, "_prewarm_screenshot"))
 
+    def test_get_drive_session(self):
+        from gdrive_uploader import get_drive_session
+        sess = get_drive_session()
+        self.assertIsNotNone(sess)
+        self.assertTrue(hasattr(sess, "post"))
+
+    def test_upload_notification_toast_lifecycle(self):
+        from gdrive_uploader import UploadNotificationToast
+        toast = UploadNotificationToast()
+        toast.show_uploading()
+        self.assertIn("正在上传", toast.title_lbl.text())
+        self.assertFalse(toast.link_edit.isVisible())
+
+        toast.show_success("https://drive.google.com/test_123")
+        self.assertIn("成功", toast.title_lbl.text())
+        self.assertTrue(toast.link_edit.isVisible())
+        self.assertEqual(toast.link_edit.text(), "https://drive.google.com/test_123")
+        self.assertEqual(toast._countdown, 5)
+
+        # Tick 4 times
+        for _ in range(4):
+            toast._on_tick()
+        self.assertEqual(toast._countdown, 1)
+        self.assertIn("1s", toast.timer_badge.text())
+
+        # 5th tick triggers close
+        toast._on_tick()
+        self.assertEqual(toast._countdown, 0)
+        self.assertFalse(toast._timer.isActive())
+        toast.close()
+
 
 if __name__ == "__main__":
     unittest.main()
