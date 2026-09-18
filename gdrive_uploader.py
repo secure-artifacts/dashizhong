@@ -529,10 +529,44 @@ class GoogleDriveUploader:
                     if info.get("trashed"):
                         return False, f"指定的目标文件夹已在回收站中 ({info.get('name')})"
                     return True, f"连接正常！目标文件夹：【{info.get('name')}】"
-                elif resp.status_code == 404:
-                    return False, "目标文件夹不存在或当前授权账号无权访问该文件夹"
-                else:
-                    return False, f"验证文件夹失败 ({resp.status_code}): {resp.text}"
+
+                # Under drive.file scope, folders created outside this app return 404 on GET.
+                # In this case, test actual write capability via a lightweight temporary probe.
+                if resp.status_code == 404:
+                    probe_headers = {
+                        "Authorization": f"Bearer {token}",
+                        "Content-Type": "application/json",
+                    }
+                    probe_payload = {
+                        "name": f".probe_{int(time.time())}.tmp",
+                        "parents": [fid],
+                        "mimeType": "text/plain",
+                    }
+                    probe_resp = requests.post(
+                        f"{DRIVE_FILES_URL}?fields=id",
+                        headers=probe_headers,
+                        json=probe_payload,
+                        timeout=10,
+                    )
+                    if probe_resp.status_code in (200, 201):
+                        probe_id = probe_resp.json().get("id")
+                        if probe_id:
+                            try:
+                                requests.delete(
+                                    f"{DRIVE_FILES_URL}/{probe_id}", headers=headers, timeout=5
+                                )
+                            except Exception:
+                                pass
+                        return True, f"连接正常！Google 账号授权有效，目标文件夹【{fid}】具备上传写入权限！"
+                    elif probe_resp.status_code == 404:
+                        return False, f"目标文件夹不存在（ID: {fid}），请检查文件夹 ID 是否填写正确"
+                    elif probe_resp.status_code == 403:
+                        err_msg = probe_resp.json().get("error", {}).get("message", probe_resp.text)
+                        return False, f"当前 Google 账号无权写入该文件夹：{err_msg}"
+                    else:
+                        return False, f"验证文件夹写入权限失败 ({probe_resp.status_code})"
+
+                return False, f"验证文件夹失败 ({resp.status_code}): {resp.text}"
             except Exception as exc:
                 return False, f"网络请求异常：{exc}"
         else:

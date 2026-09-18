@@ -507,10 +507,13 @@ class SettingsDialog(_StyledDialog):
         self.gdrive_folder_id.setPlaceholderText("例如: 1ZsewY2AEYQx-aI6VGaerKldyOWr-yQxi")
         self.gdrive_folder_id.setEnabled(self.gdrive_use_folder.isChecked())
 
-        folder_help_btn = QPushButton("?")
-        folder_help_btn.setFixedSize(26, 26)
-        folder_help_btn.setStyleSheet("background: #334155; color: #94a3b8; font-weight: bold; border-radius: 4px; font-size: 13px;")
-        folder_help_btn.setToolTip("如何获取文件夹 ID：\n在浏览器中打开谷歌云端硬盘对应的文件夹，\n网址中 folders/ 后面的一串字符即为文件夹 ID。")
+        folder_help_btn = QPushButton("❓ 如何获取 ID")
+        folder_help_btn.setFixedHeight(28)
+        folder_help_btn.setStyleSheet(
+            "QPushButton { background: #334155; color: #cbd5e1; font-weight: 600; border: 1px solid #475569; border-radius: 5px; padding: 0 10px; font-size: 12px; }"
+            "QPushButton:hover { background: #475569; color: #f8fafc; border-color: #64748b; }"
+        )
+        folder_help_btn.setToolTip("点击查看如何从浏览器获取 Google Drive 文件夹 ID 的详细步骤说明")
         folder_help_btn.clicked.connect(self._show_gdrive_folder_help)
 
         self.gdrive_use_folder.toggled.connect(self.gdrive_folder_id.setEnabled)

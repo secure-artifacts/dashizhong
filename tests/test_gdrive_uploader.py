@@ -111,11 +111,38 @@ class GoogleDriveUploaderTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertIn("我的截图文件夹", msg)
 
+    @patch("requests.post")
     @patch("requests.get")
-    def test_test_connection_folder_not_found(self, mock_get):
-        mock_resp = MagicMock()
-        mock_resp.status_code = 404
-        mock_get.return_value = mock_resp
+    def test_test_connection_folder_probe_success_on_404_get(self, mock_get, mock_post):
+        mock_get_resp = MagicMock()
+        mock_get_resp.status_code = 404
+        mock_get.return_value = mock_get_resp
+
+        mock_post_resp = MagicMock()
+        mock_post_resp.status_code = 200
+        mock_post_resp.json.return_value = {"id": "probe_id_999"}
+        mock_post.return_value = mock_post_resp
+
+        creds = {
+            "access_token": "tok_123",
+            "expires_at": time.time() + 3600,
+        }
+        with patch("requests.delete") as mock_del:
+            ok, msg = GoogleDriveUploader.test_connection(creds, "folder_123")
+            self.assertTrue(ok)
+            self.assertIn("具备上传写入权限", msg)
+            mock_del.assert_called_once()
+
+    @patch("requests.post")
+    @patch("requests.get")
+    def test_test_connection_folder_not_found(self, mock_get, mock_post):
+        mock_get_resp = MagicMock()
+        mock_get_resp.status_code = 404
+        mock_get.return_value = mock_get_resp
+
+        mock_post_resp = MagicMock()
+        mock_post_resp.status_code = 404
+        mock_post.return_value = mock_post_resp
 
         creds = {
             "access_token": "tok_123",
