@@ -130,6 +130,36 @@ class GoogleDriveUploaderTests(unittest.TestCase):
         res = copy_text_to_clipboard(test_url)
         self.assertTrue(res)
 
+    def test_upload_direct_link_selection(self):
+        with patch("requests.post") as mock_post:
+            upload_resp = MagicMock()
+            upload_resp.status_code = 200
+            upload_resp.json.return_value = {"id": "direct_id_888", "name": "Direct.png"}
+            perm_resp = MagicMock()
+            perm_resp.status_code = 200
+            perm_resp.json.return_value = {"id": "anyoneWithLink"}
+            mock_post.side_effect = [upload_resp, perm_resp]
+
+            result = GoogleDriveUploader.upload_png_bytes(
+                png_bytes=b"fake",
+                access_token="fake_token",
+                direct_link=True,
+            )
+            self.assertEqual(result["share_url"], "https://lh3.googleusercontent.com/d/direct_id_888")
+
+    def test_default_sharex_credentials_present(self):
+        from gdrive_uploader import DEFAULT_CLIENT_ID, DEFAULT_CLIENT_SECRET
+        self.assertTrue(DEFAULT_CLIENT_ID.endswith(".apps.googleusercontent.com"))
+        self.assertGreater(len(DEFAULT_CLIENT_SECRET), 10)
+
+    def test_find_sharex_gdrive_config(self):
+        from gdrive_uploader import find_sharex_gdrive_config
+        cfg = find_sharex_gdrive_config()
+        # On this user's machine, ShareX is installed and configured
+        if cfg:
+            self.assertIn("folder_id", cfg)
+            self.assertIn("is_public", cfg)
+
     def test_dock_action_row_contains_upload(self):
         keys = [item[0] for item in DOCK_ACTION_ROW]
         self.assertIn("upload", keys)

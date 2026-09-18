@@ -245,7 +245,7 @@ class _StyledDialog(QDialog):
         super().__init__(parent)
         from skin import get_app_version, make_version_badge
         self.setWindowTitle(f"Clock/Alarm v{get_app_version()} — {title}")
-        self.setMinimumWidth(520)
+        self.setMinimumWidth(560)
         self.setStyleSheet(
             """
             QDialog { background: #07111f; color: #e2e8f0; }
@@ -288,7 +288,7 @@ class SettingsDialog(_StyledDialog):
         super().__init__("Clock/Alarm 设置", parent)
         self.state = state
         self.save_state = save_state
-        self.resize(540, 600)
+        self.resize(580, 680)
 
         main_layout = QVBoxLayout(self)
         main_layout.setSpacing(12)
@@ -304,10 +304,11 @@ class SettingsDialog(_StyledDialog):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         content_widget = QWidget()
         layout = QVBoxLayout(content_widget)
         layout.setSpacing(12)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(2, 0, 16, 0)
 
         general = QGroupBox("常规")
         general_layout = QVBoxLayout(general)
@@ -421,87 +422,147 @@ class SettingsDialog(_StyledDialog):
         screenshot_form.addRow("截图保存目录", dir_widget)
         layout.addWidget(screenshot_group)
 
-        # Google Drive Cloud Upload Section (ShareX-style)
+        # Google Drive Cloud Upload Section (ShareX 1:1 Clean Style)
         gdrive_group = QGroupBox("☁️ Google Drive 截图云端上传 (ShareX 风格)")
-        gdrive_form = QFormLayout(gdrive_group)
+        gdrive_layout = QVBoxLayout(gdrive_group)
+        gdrive_layout.setSpacing(10)
         gdrive_cfg = screenshot_cfg.setdefault("gdrive", {})
         self.gdrive_creds = dict(gdrive_cfg.get("credentials") or {})
 
-        # 1. Status row with account email & buttons
-        status_widget = QWidget()
-        status_layout = QHBoxLayout(status_widget)
-        status_layout.setContentsMargins(0, 0, 0, 0)
-        status_layout.setSpacing(8)
+        from gdrive_uploader import find_sharex_gdrive_config
+        sharex_info = find_sharex_gdrive_config()
+
+        # Row 1: Status (Green when connected) + Connect / Disconnect button
+        status_row = QHBoxLayout()
+        status_row.setContentsMargins(0, 0, 0, 0)
+        status_row.setSpacing(10)
 
         self.gdrive_status_label = QLabel()
-        status_layout.addWidget(self.gdrive_status_label)
-        status_layout.addStretch()
+        self.gdrive_status_label.setStyleSheet("font-size: 13px; font-weight: 600;")
+        status_row.addWidget(self.gdrive_status_label)
+        status_row.addStretch()
 
-        self.gdrive_auth_btn = QPushButton("🔗 授权 Google 账号")
-        self.gdrive_auth_btn.setFixedHeight(28)
-        self.gdrive_auth_btn.setStyleSheet("background-color: #0284c7; color: white; font-weight: bold; border-radius: 5px; padding: 0 12px;")
+        self.gdrive_auth_btn = QPushButton("连接 Google Drive")
+        self.gdrive_auth_btn.setFixedHeight(30)
+        self.gdrive_auth_btn.setStyleSheet(
+            "background-color: #0284c7; color: white; font-weight: bold; border-radius: 6px; padding: 0 16px;"
+        )
 
-        self.gdrive_revoke_btn = QPushButton("🔓 解绑")
-        self.gdrive_revoke_btn.setFixedHeight(28)
-        self.gdrive_revoke_btn.setStyleSheet("background-color: #334155; color: #f87171; border-radius: 5px; padding: 0 10px;")
+        self.gdrive_revoke_btn = QPushButton("断开连接")
+        self.gdrive_revoke_btn.setFixedHeight(30)
+        self.gdrive_revoke_btn.setStyleSheet(
+            "background-color: #334155; color: #f87171; font-weight: bold; border-radius: 6px; padding: 0 14px;"
+        )
 
-        self.gdrive_test_btn = QPushButton("🧪 测试连接")
-        self.gdrive_test_btn.setFixedHeight(28)
-        self.gdrive_test_btn.setStyleSheet("background-color: #1e293b; color: #38bdf8; border: 1px solid #0284c7; border-radius: 5px; padding: 0 10px;")
+        status_row.addWidget(self.gdrive_auth_btn)
+        status_row.addWidget(self.gdrive_revoke_btn)
+        gdrive_layout.addLayout(status_row)
 
-        status_layout.addWidget(self.gdrive_auth_btn)
-        status_layout.addWidget(self.gdrive_revoke_btn)
-        status_layout.addWidget(self.gdrive_test_btn)
-        gdrive_form.addRow("授权状态", status_widget)
+        # Optional ShareX one-click sync banner if ShareX is detected
+        if sharex_info:
+            sharex_box = QWidget()
+            sharex_box.setStyleSheet("background: rgba(14, 165, 233, 0.1); border: 1px dashed #0284c7; border-radius: 6px;")
+            s_layout = QHBoxLayout(sharex_box)
+            s_layout.setContentsMargins(10, 6, 10, 6)
+            s_lbl = QLabel("💡 检测到本机已安装 ShareX")
+            s_lbl.setStyleSheet("color: #38bdf8; font-size: 12px; border: none; background: transparent;")
+            s_btn = QPushButton("📥 一键导入配置")
+            s_btn.setFixedHeight(26)
+            s_btn.setStyleSheet("background-color: #0284c7; color: white; font-size: 11px; font-weight: bold; border-radius: 4px; padding: 0 10px; border: none;")
+            s_btn.setToolTip("点击自动将 ShareX 中的文件夹 ID 及上传设置同步至此处")
+            s_btn.clicked.connect(lambda: self._import_sharex_settings(sharex_info))
+            s_layout.addWidget(s_lbl)
+            s_layout.addStretch()
+            s_layout.addWidget(s_btn)
+            gdrive_layout.addWidget(sharex_box)
 
-        # 2. Target Folder ID
-        folder_widget = QWidget()
-        folder_vbox = QVBoxLayout(folder_widget)
-        folder_vbox.setContentsMargins(0, 0, 0, 0)
-        folder_vbox.setSpacing(3)
+        # Checkboxes 1:1 matching ShareX
+        self.gdrive_is_public = QCheckBox("公开上传")
+        self.gdrive_is_public.setChecked(bool(gdrive_cfg.get("is_public", True)))
+        self.gdrive_is_public.setToolTip("上传后自动将文件设为任何人可读，生成公开预览分享链接")
+        gdrive_layout.addWidget(self.gdrive_is_public)
+
+        self.gdrive_direct_link = QCheckBox("使用直链")
+        self.gdrive_direct_link.setChecked(bool(gdrive_cfg.get("direct_link", False)))
+        self.gdrive_direct_link.setToolTip("勾选后将自动复制图片直接外链 (lh3.googleusercontent.com/d/ID)；未勾选则复制 Google Drive 标准预览分享页面")
+        gdrive_layout.addWidget(self.gdrive_direct_link)
+
+        self.gdrive_use_folder = QCheckBox("上传文件到选定的文件夹")
+        self.gdrive_use_folder.setChecked(bool(gdrive_cfg.get("use_folder", True)))
+        gdrive_layout.addWidget(self.gdrive_use_folder)
+
+        # Folder ID input row
+        folder_row = QHBoxLayout()
+        folder_row.setContentsMargins(0, 0, 0, 0)
+        folder_row.setSpacing(8)
+
+        folder_label = QLabel("文件夹 ID:")
+        folder_label.setStyleSheet("font-size: 12px; color: #cbd5e1;")
 
         self.gdrive_folder_id = QLineEdit()
-        self.gdrive_folder_id.setText(str(gdrive_cfg.get("folder_id") or ""))
-        self.gdrive_folder_id.setPlaceholderText("粘贴 Google 云端文件夹 ID（留空则默认保存在云盘根目录）")
+        default_fid = gdrive_cfg.get("folder_id")
+        if not default_fid and sharex_info and sharex_info.get("folder_id"):
+            default_fid = sharex_info.get("folder_id")
+        self.gdrive_folder_id.setText(str(default_fid or ""))
+        self.gdrive_folder_id.setPlaceholderText("例如: 1ZsewY2AEYQx-aI6VGaerKldyOWr-yQxi")
+        self.gdrive_folder_id.setEnabled(self.gdrive_use_folder.isChecked())
 
-        folder_tip = QLabel("💡 提示：在谷歌云端硬盘中打开目标文件夹，复制网页地址栏中 folders/ 后面的一串字符粘贴于此。")
-        folder_tip.setStyleSheet("color: #94a3b8; font-size: 11px;")
-        folder_vbox.addWidget(self.gdrive_folder_id)
-        folder_vbox.addWidget(folder_tip)
-        gdrive_form.addRow("云端目标文件夹", folder_widget)
+        folder_help_btn = QPushButton("?")
+        folder_help_btn.setFixedSize(26, 26)
+        folder_help_btn.setStyleSheet("background: #334155; color: #94a3b8; font-weight: bold; border-radius: 4px; font-size: 13px;")
+        folder_help_btn.setToolTip("如何获取文件夹 ID：\n在浏览器中打开谷歌云端硬盘对应的文件夹，\n网址中 folders/ 后面的一串字符即为文件夹 ID。")
+        folder_help_btn.clicked.connect(self._show_gdrive_folder_help)
 
-        # 3. Custom OAuth Credentials (ShareX-style)
-        cred_widget = QWidget()
-        cred_vbox = QVBoxLayout(cred_widget)
-        cred_vbox.setContentsMargins(0, 0, 0, 0)
-        cred_vbox.setSpacing(4)
+        self.gdrive_use_folder.toggled.connect(self.gdrive_folder_id.setEnabled)
 
-        cred_form = QFormLayout()
-        cred_form.setContentsMargins(0, 0, 0, 0)
+        folder_row.addWidget(folder_label)
+        folder_row.addWidget(self.gdrive_folder_id, 1)
+        folder_row.addWidget(folder_help_btn)
+        gdrive_layout.addLayout(folder_row)
+
+        # Action buttons: Test connection
+        test_row = QHBoxLayout()
+        test_row.setContentsMargins(0, 0, 0, 0)
+        self.gdrive_test_btn = QPushButton("🧪 测试连接与文件夹有效性")
+        self.gdrive_test_btn.setFixedHeight(28)
+        self.gdrive_test_btn.setStyleSheet("background-color: #1e293b; color: #38bdf8; border: 1px solid #0284c7; border-radius: 5px; padding: 0 14px;")
+        self.gdrive_test_btn.clicked.connect(self._on_gdrive_test)
+        test_row.addWidget(self.gdrive_test_btn)
+        test_row.addStretch()
+        gdrive_layout.addLayout(test_row)
+
+        # Optional Advanced: custom OAuth credentials (collapsed by default)
+        self.gdrive_custom_toggle = QCheckBox("使用自定义 OAuth 凭据 (高级选项)")
+        self.gdrive_custom_toggle.setChecked(bool(gdrive_cfg.get("use_custom_creds", False)))
+        gdrive_layout.addWidget(self.gdrive_custom_toggle)
+
+        self.gdrive_custom_box = QWidget()
+        custom_vbox = QVBoxLayout(self.gdrive_custom_box)
+        custom_vbox.setContentsMargins(0, 4, 0, 0)
+        custom_vbox.setSpacing(4)
+        custom_form = QFormLayout()
+        custom_form.setContentsMargins(0, 0, 0, 0)
+
         self.gdrive_client_id = QLineEdit()
         self.gdrive_client_id.setText(str(gdrive_cfg.get("client_id") or ""))
-        self.gdrive_client_id.setPlaceholderText("Google Cloud 客户端 ID (Client ID)")
+        self.gdrive_client_id.setPlaceholderText("留空则默认使用 ShareX 官方内置凭据")
 
         self.gdrive_client_secret = QLineEdit()
         self.gdrive_client_secret.setEchoMode(QLineEdit.EchoMode.Password)
         self.gdrive_client_secret.setText(str(gdrive_cfg.get("client_secret") or ""))
-        self.gdrive_client_secret.setPlaceholderText("Google Cloud 客户端密钥 (Client Secret)")
+        self.gdrive_client_secret.setPlaceholderText("留空则默认使用 ShareX 官方内置凭据")
 
-        cred_form.addRow("Client ID", self.gdrive_client_id)
-        cred_form.addRow("Client Secret", self.gdrive_client_secret)
-        cred_vbox.addLayout(cred_form)
+        custom_form.addRow("Client ID", self.gdrive_client_id)
+        custom_form.addRow("Client Secret", self.gdrive_client_secret)
+        custom_vbox.addLayout(custom_form)
 
-        cred_help = QLabel("📘 说明：请在 Google Cloud Console 创建 OAuth 2.0 客户端 ID（应用类型选择【桌面应用 Desktop app】），启用 Google Drive API 后填入上方即可使用。")
-        cred_help.setWordWrap(True)
-        cred_help.setStyleSheet("color: #64748b; font-size: 11px;")
-        cred_vbox.addWidget(cred_help)
-
-        gdrive_form.addRow("OAuth 凭据", cred_widget)
+        self.gdrive_custom_box.setVisible(self.gdrive_custom_toggle.isChecked())
+        self.gdrive_custom_toggle.toggled.connect(self.gdrive_custom_box.setVisible)
+        gdrive_layout.addWidget(self.gdrive_custom_box)
 
         self._update_gdrive_status_ui()
         self.gdrive_auth_btn.clicked.connect(self._on_gdrive_auth)
         self.gdrive_revoke_btn.clicked.connect(self._on_gdrive_revoke)
-        self.gdrive_test_btn.clicked.connect(self._on_gdrive_test)
 
         layout.addWidget(gdrive_group)
 
@@ -601,9 +662,13 @@ class SettingsDialog(_StyledDialog):
         if save_dir_text:
             screenshot_cfg["save_dir"] = save_dir_text
 
-        # Save Google Drive configuration
+        # Save Google Drive configuration (ShareX-style)
         gdrive_cfg = screenshot_cfg.setdefault("gdrive", {})
+        gdrive_cfg["is_public"] = self.gdrive_is_public.isChecked()
+        gdrive_cfg["direct_link"] = self.gdrive_direct_link.isChecked()
+        gdrive_cfg["use_folder"] = self.gdrive_use_folder.isChecked()
         gdrive_cfg["folder_id"] = self.gdrive_folder_id.text().strip()
+        gdrive_cfg["use_custom_creds"] = self.gdrive_custom_toggle.isChecked()
         gdrive_cfg["client_id"] = self.gdrive_client_id.text().strip()
         gdrive_cfg["client_secret"] = self.gdrive_client_secret.text().strip()
         if hasattr(self, "gdrive_creds") and self.gdrive_creds:
@@ -674,31 +739,63 @@ class SettingsDialog(_StyledDialog):
         prefs["ignored_update_version"] = version
         self.save_state()
 
+    def _import_sharex_settings(self, info: dict) -> None:
+        if info.get("folder_id"):
+            self.gdrive_folder_id.setText(info["folder_id"])
+        self.gdrive_is_public.setChecked(bool(info.get("is_public", True)))
+        self.gdrive_direct_link.setChecked(bool(info.get("direct_link", False)))
+        self.gdrive_use_folder.setChecked(bool(info.get("use_folder", True)))
+        self.gdrive_folder_id.setEnabled(self.gdrive_use_folder.isChecked())
+        QMessageBox.information(
+            self,
+            "导入成功",
+            f"已成功同步 ShareX 配置：\n\n"
+            f"• 文件夹 ID: {info.get('folder_id') or '（未指定）'}\n"
+            f"• 公开上传: {'开启' if info.get('is_public') else '关闭'}\n"
+            f"• 直链模式: {'开启' if info.get('direct_link') else '关闭'}\n\n"
+            "若尚未授权，点击【连接 Google Drive】即可一键授权！",
+        )
+
+    def _show_gdrive_folder_help(self) -> None:
+        QMessageBox.information(
+            self,
+            "如何获取文件夹 ID",
+            "1. 在浏览器中打开您的 Google Drive (谷歌云盘)；\n"
+            "2. 打开用于存放截图的目标文件夹；\n"
+            "3. 查看浏览器地址栏，URL 格式形如：\n"
+            "   https://drive.google.com/drive/folders/1ZsewY2AEYQx-aI6VGaerKldyOWr-yQxi\n"
+            "4. 复制 folders/ 后面的这一串字符串，粘贴到此输入框即可！\n\n"
+            "💡 提示：若未勾选【上传文件到选定的文件夹】或留空，截图将保存在云盘根目录。",
+        )
+
     def _update_gdrive_status_ui(self) -> None:
         creds = getattr(self, "gdrive_creds", {})
         token = creds.get("access_token") or creds.get("refresh_token")
         if token:
-            email = creds.get("email") or "Google 账号"
-            self.gdrive_status_label.setText(f"<span style='color:#34d399; font-weight:bold;'>✅ 已授权: {email}</span>")
-            self.gdrive_revoke_btn.setEnabled(True)
+            display_user = creds.get("name") or creds.get("email") or "Google 用户"
+            self.gdrive_status_label.setText(f"<span style='color: #4ade80;'>状态：已登录为 {display_user}。</span>")
+            self.gdrive_auth_btn.setVisible(False)
+            self.gdrive_revoke_btn.setVisible(True)
             self.gdrive_test_btn.setEnabled(True)
-            self.gdrive_auth_btn.setText("🔄 重新授权")
         else:
-            self.gdrive_status_label.setText("<span style='color:#94a3b8;'>⚪ 未授权 (请点击右侧按钮进行授权)</span>")
-            self.gdrive_revoke_btn.setEnabled(False)
+            self.gdrive_status_label.setText("<span style='color: #94a3b8;'>状态：未连接</span>")
+            self.gdrive_auth_btn.setVisible(True)
+            self.gdrive_auth_btn.setText("连接 Google Drive")
+            self.gdrive_revoke_btn.setVisible(False)
             self.gdrive_test_btn.setEnabled(False)
-            self.gdrive_auth_btn.setText("🔗 授权 Google 账号")
 
     def _on_gdrive_auth(self) -> None:
         from gdrive_uploader import GoogleDriveAuthManager
 
-        client_id = self.gdrive_client_id.text().strip()
-        client_secret = self.gdrive_client_secret.text().strip()
-        if not client_id or not client_secret:
+        use_custom = self.gdrive_custom_toggle.isChecked()
+        client_id = self.gdrive_client_id.text().strip() if use_custom else ""
+        client_secret = self.gdrive_client_secret.text().strip() if use_custom else ""
+
+        if use_custom and (not client_id or not client_secret):
             QMessageBox.warning(
                 self,
                 "提示",
-                "请先在下方【OAuth 凭据】中填入您的 Google Cloud Client ID 与 Client Secret。\n\n如尚未创建，请参考下方说明前往 Google Cloud 控制台创建桌面端凭据。",
+                "您勾选了自定义 OAuth 凭据，请填入 Client ID 与 Client Secret；或者取消勾选以直接使用官方内置免配凭据。",
             )
             return
 
@@ -712,10 +809,11 @@ class SettingsDialog(_StyledDialog):
             gdrive_cfg["client_id"] = client_id
             gdrive_cfg["client_secret"] = client_secret
             self.save_state()
+            display_user = creds.get("name") or creds.get("email") or "Google 用户"
             QMessageBox.information(
                 self,
-                "Google 账号授权成功",
-                f"🎉 成功连接到 Google Drive！\n已绑定账号：{creds.get('email')}\n\n您现在可以在截图工具条中点击 ☁️ 按钮直接将截图上传至 Google 云盘并自动复制公开直链！",
+                "连接成功",
+                f"🎉 Google Drive 授权成功！\n已登录为：{display_user}\n\n您现在可以在截图工具条中点击 ☁️ 按钮直接将截图上传至 Google 云盘并自动生成公开直链！",
             )
 
         def _on_failed(err_msg: str) -> None:
@@ -728,8 +826,8 @@ class SettingsDialog(_StyledDialog):
         if ok:
             QMessageBox.information(
                 self,
-                "正在授权",
-                "已为您在默认浏览器中打开 Google 登录授权页面。\n\n请在浏览器中完成登录并点击允许，授权完成后网页会提示成功，本软件将自动接收授权结果。",
+                "正在连接",
+                "已为您在默认浏览器中打开 Google 登录授权页面。\n\n请在浏览器中选择您的谷歌账号并点击允许，授权完成后网页会提示成功，软件将自动完成连接！",
             )
         else:
             QMessageBox.warning(self, "启动授权失败", msg)
@@ -737,8 +835,8 @@ class SettingsDialog(_StyledDialog):
     def _on_gdrive_revoke(self) -> None:
         reply = QMessageBox.question(
             self,
-            "解除授权",
-            "确定要解除与当前 Google 账号的绑定吗？",
+            "断开连接",
+            "确定要断开与当前 Google Drive 账号的连接吗？",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
@@ -752,15 +850,15 @@ class SettingsDialog(_StyledDialog):
             gdrive_cfg["credentials"] = {}
             self._update_gdrive_status_ui()
             self.save_state()
-            QMessageBox.information(self, "已解绑", "已成功解除 Google 账号授权。")
+            QMessageBox.information(self, "已断开", "已断开与 Google Drive 的连接。")
 
     def _on_gdrive_test(self) -> None:
         from gdrive_uploader import GoogleDriveUploader
 
         if not self.gdrive_creds:
-            QMessageBox.warning(self, "未授权", "当前尚未绑定 Google 账号，请先授权。")
+            QMessageBox.warning(self, "未连接", "当前尚未连接 Google Drive，请先点击【连接 Google Drive】。")
             return
-        folder_id = self.gdrive_folder_id.text().strip()
+        folder_id = self.gdrive_folder_id.text().strip() if self.gdrive_use_folder.isChecked() else None
         ok, msg = GoogleDriveUploader.test_connection(self.gdrive_creds, folder_id)
         if ok:
             QMessageBox.information(self, "Google Drive 连接测试", f"✅ {msg}")

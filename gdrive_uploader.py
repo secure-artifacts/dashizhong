@@ -36,6 +36,41 @@ DRIVE_FILES_URL = "https://www.googleapis.com/drive/v3/files"
 # Minimal scope: only files created/opened by this app, plus user email for UI status
 SCOPES = "https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/userinfo.email"
 
+# ShareX official built-in Google OAuth Desktop Client Credentials
+DEFAULT_CLIENT_ID = "810697162603-ag350u1fnmf3riubv91otme0v5fkk2d6.apps.googleusercontent.com"
+DEFAULT_CLIENT_SECRET = "mDft-efE0PUcwIRCLG8nkLD9"
+
+
+def find_sharex_gdrive_config() -> dict | None:
+    """Check if ShareX is installed and has Google Drive configuration."""
+    from pathlib import Path
+    candidates = [
+        Path.home() / "Documents" / "ShareX" / "UploadersConfig.json",
+        Path.home() / "AppData" / "Local" / "ShareX" / "UploadersConfig.json",
+        Path.home() / "AppData" / "Roaming" / "ShareX" / "UploadersConfig.json",
+    ]
+    for p in candidates:
+        if p.is_file():
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+                user_info = data.get("GoogleDriveUserInfo") or {}
+                folder_id = data.get("GoogleDriveFolderID") or ""
+                is_public = data.get("GoogleDriveIsPublic", True)
+                direct_link = data.get("GoogleDriveDirectLink", False)
+                use_folder = data.get("GoogleDriveUseFolder", True)
+                name = user_info.get("name") or user_info.get("given_name") or ""
+                return {
+                    "source_file": str(p),
+                    "name": name,
+                    "folder_id": folder_id,
+                    "is_public": is_public,
+                    "direct_link": direct_link,
+                    "use_folder": use_folder,
+                }
+            except Exception:
+                pass
+    return None
+
 
 def find_available_port(start_port: int = 8085, max_port: int = 8099) -> int:
     """Find an available port on 127.0.0.1 for the local OAuth redirect server."""
@@ -171,12 +206,12 @@ class GoogleDriveAuthManager(QObject):
         self._server: _OAuthServer | None = None
         self._server_thread: threading.Thread | None = None
 
-    def start_authorization(self, client_id: str, client_secret: str) -> tuple[bool, str]:
+    def start_authorization(
+        self, client_id: str | None = None, client_secret: str | None = None
+    ) -> tuple[bool, str]:
         """Launch local loopback server and open default browser for Google OAuth."""
-        client_id = client_id.strip()
-        client_secret = client_secret.strip()
-        if not client_id or not client_secret:
-            return False, "客户端 ID (Client ID) 与客户端密钥 (Client Secret) 不能为空"
+        cid = (client_id or "").strip() or DEFAULT_CLIENT_ID
+        csec = (client_secret or "").strip() or DEFAULT_CLIENT_SECRET
 
         try:
             port = find_available_port()
@@ -189,7 +224,7 @@ class GoogleDriveAuthManager(QObject):
                 try:
                     server.handle_request()  # handle single GET request
                     if server.auth_code:
-                        self._exchange_code(server.auth_code, client_id, client_secret, redirect_uri)
+                        self._exchange_code(server.auth_code, cid, csec, redirect_uri)
                     else:
                         err = server.auth_error or "用户取消授权或未收到授权码"
                         self.auth_failed.emit(f"授权失败：{err}")
@@ -206,7 +241,7 @@ class GoogleDriveAuthManager(QObject):
             self._server_thread.start()
 
             params = {
-                "client_id": client_id,
+                "client_id": cid,
                 "redirect_uri": redirect_uri,
                 "response_type": "code",
                 "scope": SCOPES,
@@ -247,8 +282,9 @@ class GoogleDriveAuthManager(QObject):
             expires_in = token_data.get("expires_in", 3600)
             expires_at = time.time() + float(expires_in)
 
-            # Fetch user email for status display
+            # Fetch user email and display name
             email = "Google 账号"
+            name = ""
             try:
                 userinfo_resp = requests.get(
                     GOOGLE_USERINFO_URL,
@@ -256,7 +292,9 @@ class GoogleDriveAuthManager(QObject):
                     timeout=10,
                 )
                 if userinfo_resp.status_code == 200:
-                    email = userinfo_resp.json().get("email") or email
+                    uinfo = userinfo_resp.json()
+                    email = uinfo.get("email") or email
+                    name = uinfo.get("name") or uinfo.get("given_name") or ""
             except Exception:
                 pass
 
@@ -267,6 +305,7 @@ class GoogleDriveAuthManager(QObject):
                 "refresh_token": refresh_token,
                 "expires_at": expires_at,
                 "email": email,
+                "name": name,
                 "authorized_at": time.time(),
             }
             self.auth_success.emit(payload)
@@ -281,8 +320,8 @@ class GoogleDriveAuthManager(QObject):
         Returns (success, error_or_token, updated_credentials).
         """
         refresh_token = credentials.get("refresh_token")
-        client_id = credentials.get("client_id")
-        client_secret = credentials.get("client_secret")
+        client_id = (credentials.get("client_id") or "").strip() or DEFAULT_CLIENT_ID
+        client_secret = (credentials.get("client_secret") or "").strip() or DEFAULT_CLIENT_SECRET
 
         if not refresh_token or not client_id or not client_secret:
             return False, "缺少 refresh_token 或客户端凭据，请重新授权", credentials
@@ -356,6 +395,8 @@ class GoogleDriveUploader:
         access_token: str,
         folder_id: str | None = None,
         filename: str | None = None,
+        is_public: bool = True,
+        direct_link: bool = False,
     ) -> dict:
         """Uploads PNG bytes using Google Drive v3 multipart upload.
         
@@ -407,30 +448,33 @@ class GoogleDriveUploader:
         file_data = resp.json()
         file_id = file_data["id"]
 
-        # 3. Make file public (anyone: reader)
-        perm_url = f"{DRIVE_FILES_URL}/{file_id}/permissions"
-        perm_headers = {
-            "Authorization": f"Bearer {access_token}",
-            "Content-Type": "application/json",
-        }
-        perm_resp = requests.post(
-            perm_url,
-            headers=perm_headers,
-            json={"role": "reader", "type": "anyone"},
-            timeout=15,
-        )
-        if perm_resp.status_code not in (200, 201):
-            logger.warning("设置公开权限返回非 200: %s", perm_resp.text)
+        # 3. Make file public (anyone: reader) if is_public is True
+        if is_public:
+            perm_url = f"{DRIVE_FILES_URL}/{file_id}/permissions"
+            perm_headers = {
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+            }
+            perm_resp = requests.post(
+                perm_url,
+                headers=perm_headers,
+                json={"role": "reader", "type": "anyone"},
+                timeout=15,
+            )
+            if perm_resp.status_code not in (200, 201):
+                logger.warning("设置公开权限返回非 200: %s", perm_resp.text)
 
         # 4. Construct ShareX-style links
         web_view_link = f"https://drive.google.com/file/d/{file_id}/view?usp=sharing"
-        direct_link = f"https://lh3.googleusercontent.com/d/{file_id}"
+        direct_link_url = f"https://lh3.googleusercontent.com/d/{file_id}"
+        share_url = direct_link_url if direct_link else web_view_link
 
         return {
             "id": file_id,
             "name": filename,
             "web_view_link": web_view_link,
-            "direct_link": direct_link,
+            "direct_link": direct_link_url,
+            "share_url": share_url,
         }
 
     @staticmethod
@@ -514,18 +558,24 @@ class GoogleDriveUploadWorker(QThread):
                 self.upload_failed.emit("无效的图像数据格式")
                 return
 
-            folder_id = str(gdrive_cfg.get("folder_id") or "").strip()
+            use_folder = bool(gdrive_cfg.get("use_folder", True))
+            folder_id = str(gdrive_cfg.get("folder_id") or "").strip() if use_folder else None
+            is_public = bool(gdrive_cfg.get("is_public", True))
+            direct_link = bool(gdrive_cfg.get("direct_link", False))
+
             result = GoogleDriveUploader.upload_png_bytes(
                 png_bytes=png_bytes,
                 access_token=token,
                 folder_id=folder_id if folder_id else None,
                 filename=self._filename,
+                is_public=is_public,
+                direct_link=direct_link,
             )
 
             # Auto copy share link to clipboard
-            web_link = result.get("web_view_link", "")
-            if web_link:
-                copy_text_to_clipboard(web_link)
+            share_url = result.get("share_url") or result.get("web_view_link", "")
+            if share_url:
+                copy_text_to_clipboard(share_url)
 
             self.upload_success.emit(result)
 
