@@ -490,6 +490,67 @@ class SettingsDialog(_StyledDialog):
         self._update_cookie_status_ui()
 
         media_layout.addWidget(self.cookies_card)
+
+        # Media Cache Management Section
+        cache_card = QWidget()
+        cache_card.setStyleSheet("""
+            QWidget {
+                background: #1e293b;
+                border: 1px solid #334155;
+                border-radius: 8px;
+            }
+        """)
+        cache_vbox = QVBoxLayout(cache_card)
+        cache_vbox.setContentsMargins(10, 8, 10, 8)
+        cache_vbox.setSpacing(6)
+
+        cache_title = QLabel("💾 离线视频缓存与存储空间控制")
+        cache_title.setStyleSheet("color: #38bdf8; font-weight: bold; font-size: 12px;")
+        cache_vbox.addWidget(cache_title)
+
+        cache_row = QHBoxLayout()
+        cache_row.setContentsMargins(0, 0, 0, 0)
+        cache_row.setSpacing(10)
+
+        lbl_limit = QLabel("缓存容量上限:")
+        lbl_limit.setStyleSheet("color: #cbd5e1; font-size: 11px;")
+        cache_row.addWidget(lbl_limit)
+
+        self.cache_limit_spin = QSpinBox()
+        self.cache_limit_spin.setRange(50, 5000)
+        self.cache_limit_spin.setSingleStep(50)
+        self.cache_limit_spin.setValue(int(media_cfg.get("cache_limit_mb") or 500))
+        self.cache_limit_spin.setSuffix(" MB")
+        self.cache_limit_spin.setToolTip("超出上限时将自动按 LRU（最近最少使用）淘汰最旧的离线视频，确保占用永不超标")
+        cache_row.addWidget(self.cache_limit_spin)
+
+        self.lbl_cache_size = QLabel("当前已占用: 计算中…")
+        self.lbl_cache_size.setStyleSheet("color: #94a3b8; font-size: 11px; margin-left: 10px;")
+        cache_row.addWidget(self.lbl_cache_size)
+        cache_row.addStretch()
+
+        self.btn_clear_cache = QPushButton("🗑️ 清空缓存")
+        self.btn_clear_cache.setFixedHeight(26)
+        self.btn_clear_cache.setStyleSheet(
+            "QPushButton { background: #334155; color: #f87171; border: 1px solid #475569; border-radius: 4px; padding: 0 10px; font-size: 11px; font-weight: bold; }"
+            "QPushButton:hover { background: #dc2626; color: #ffffff; border-color: #ef4444; }"
+        )
+        self.btn_clear_cache.clicked.connect(self._clear_cache_action)
+        cache_row.addWidget(self.btn_clear_cache)
+
+        self.btn_open_cache = QPushButton("📂 打开目录")
+        self.btn_open_cache.setFixedHeight(26)
+        self.btn_open_cache.setStyleSheet(
+            "QPushButton { background: #334155; color: #cbd5e1; border: 1px solid #475569; border-radius: 4px; padding: 0 8px; font-size: 11px; }"
+            "QPushButton:hover { background: #475569; color: #ffffff; border-color: #64748b; }"
+        )
+        self.btn_open_cache.clicked.connect(self._open_cache_action)
+        cache_row.addWidget(self.btn_open_cache)
+
+        cache_vbox.addLayout(cache_row)
+        media_layout.addWidget(cache_card)
+        self._refresh_cache_size_ui()
+
         layout.addWidget(media_group)
 
         # Screenshot & Clipboard Section
@@ -776,6 +837,14 @@ class SettingsDialog(_StyledDialog):
         media = self.state.setdefault("media", {})
         media["allow_online"] = self.allow_online.isChecked()
         media["playlist_limit"] = int(self.playlist_limit.value())
+        if hasattr(self, "cache_limit_spin"):
+            limit_mb = int(self.cache_limit_spin.value())
+            media["cache_limit_mb"] = limit_mb
+            try:
+                from media_player_ui import prune_media_cache
+                prune_media_cache(max_bytes=limit_mb * 1024 * 1024)
+            except Exception:
+                pass
         cookies_text = self.cookies_edit.toPlainText().strip() if self.cookies_toggle.isChecked() else ""
         media["cookies_text"] = cookies_text
 
@@ -949,6 +1018,51 @@ class SettingsDialog(_StyledDialog):
         msg.setText(help_text)
         msg.setIcon(QMessageBox.Icon.Information)
         msg.exec()
+
+    def _refresh_cache_size_ui(self) -> None:
+        try:
+            from media_player_ui import get_media_cache_size
+            sz_bytes = get_media_cache_size()
+            if sz_bytes >= 1024 * 1024 * 1024:
+                size_str = f"{sz_bytes / (1024 * 1024 * 1024):.2f} GB"
+            elif sz_bytes >= 1024 * 1024:
+                size_str = f"{sz_bytes / (1024 * 1024):.1f} MB"
+            elif sz_bytes > 0:
+                size_str = f"{sz_bytes / 1024:.1f} KB"
+            else:
+                size_str = "0.0 MB"
+            self.lbl_cache_size.setText(f"当前已占用: {size_str}")
+        except Exception:
+            self.lbl_cache_size.setText("当前已占用: 0.0 MB")
+
+    def _clear_cache_action(self) -> None:
+        reply = QMessageBox.question(
+            self,
+            "清空媒体缓存",
+            "确定要清空本地所有已缓存的离线音视频文件吗？\n\n（此操作仅清除本地缓存的媒体流以释放磁盘空间，绝不会影响您的播放列表和收藏记录）",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            try:
+                from media_player_ui import clear_media_cache
+                freed = clear_media_cache()
+                self._refresh_cache_size_ui()
+                mb = freed / (1024 * 1024)
+                QMessageBox.information(self, "缓存已清空", f"成功清空本地媒体缓存，已释放约 {mb:.1f} MB 磁盘空间！")
+            except Exception as exc:
+                QMessageBox.warning(self, "清空失败", f"清理过程中发生错误：{exc}")
+
+    def _open_cache_action(self) -> None:
+        try:
+            import os
+            from PyQt6.QtCore import QUrl
+            from PyQt6.QtGui import QDesktopServices
+            loc_dir = Path(os.environ.get("LOCALAPPDATA", "")) / "ClockAlarm" / "MediaCache"
+            loc_dir.mkdir(parents=True, exist_ok=True)
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(loc_dir)))
+        except Exception:
+            pass
 
     def _import_sharex_settings(self, info: dict) -> None:
         if info.get("folder_id"):

@@ -27,6 +27,17 @@ def _install_exception_hooks() -> Path:
 
     def _write(message: str) -> None:
         try:
+            # Prevent unbounded growth: if log exceeds 1 MB, retain only the tail 100 KB
+            if log_path.is_file() and log_path.stat().st_size > 1024 * 1024:
+                try:
+                    content = log_path.read_text(encoding="utf-8", errors="ignore")
+                    tail = content[-100 * 1024 :]
+                    nl = tail.find("\n")
+                    if nl != -1:
+                        tail = tail[nl + 1 :]
+                    log_path.write_text(tail, encoding="utf-8")
+                except Exception:
+                    pass
             with log_path.open("a", encoding="utf-8") as handle:
                 handle.write(message if message.endswith("\n") else message + "\n")
         except OSError:

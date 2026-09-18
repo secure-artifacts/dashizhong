@@ -306,6 +306,7 @@ def _temp_roots() -> list[tuple[str, Path]]:
     roots = [
         ("用户临时目录", local / "Temp"),
         ("Windows Temp", windows / "Temp"),
+        ("Clock/Alarm 媒体缓存", local / "ClockAlarm" / "MediaCache"),
     ]
     # Prefetch is optional and sometimes locked; only clear files, not the folder itself.
     prefetch = windows / "Prefetch"
@@ -348,7 +349,7 @@ def clean_delivery_optimization(report: CleanReport) -> None:
 # User-facing scopes for the floating cleaner board (id -> label)
 CLEAN_SCOPES: list[tuple[str, str, str]] = [
     ("browser", "浏览器缓存", "Chrome / Edge / Firefox 等缓存与 Code Cache"),
-    ("temp", "临时文件", "用户 Temp、Windows Temp"),
+    ("temp", "临时文件", "用户 Temp、Windows Temp 及播放器缓存"),
     ("prefetch", "预读取缓存", "Windows Prefetch（*.pf）"),
     ("thumbs", "缩略图缓存", "Explorer thumbcache_*.db"),
     ("recycle", "回收站", "清空回收站（不可恢复）"),

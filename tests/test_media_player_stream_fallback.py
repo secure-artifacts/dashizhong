@@ -58,6 +58,51 @@ class MediaStreamFallbackTests(unittest.TestCase):
         self.assertIn("normalize_cookie_content", settings_source)
         self.assertIn("_show_cookie_help", settings_source)
 
+    def test_media_cache_lru_and_clear(self) -> None:
+        import tempfile
+        import time
+        import os
+        from media_player_ui import get_media_cache_size, prune_media_cache, clear_media_cache
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmppath = Path(tmpdir)
+            f1 = tmppath / "media-1.mp4"
+            f2 = tmppath / "media-2.mp4"
+            f3 = tmppath / "media-3.mp4"
+            f1.write_bytes(b"A" * 1000)
+            f2.write_bytes(b"B" * 2000)
+            f3.write_bytes(b"C" * 3000)
+
+            self.assertEqual(get_media_cache_size(tmppath), 6000)
+
+            now = time.time()
+            os.utime(f1, (now - 300, now - 300))
+            os.utime(f2, (now - 200, now - 200))
+            os.utime(f3, (now - 100, now - 100))
+
+            freed = prune_media_cache(tmppath, max_bytes=4000)
+            self.assertEqual(freed, 3000)
+            self.assertFalse(f1.exists())
+            self.assertFalse(f2.exists())
+            self.assertTrue(f3.exists())
+            self.assertEqual(get_media_cache_size(tmppath), 3000)
+
+            freed_all = clear_media_cache(tmppath)
+            self.assertEqual(freed_all, 3000)
+            self.assertFalse(f3.exists())
+            self.assertEqual(get_media_cache_size(tmppath), 0)
+
+    def test_settings_and_cleaner_contain_cache_integration(self) -> None:
+        settings_source = (ROOT / "settings_ui.py").read_text(encoding="utf-8")
+        self.assertIn("cache_limit_spin", settings_source)
+        self.assertIn("btn_clear_cache", settings_source)
+        self.assertIn("_clear_cache_action", settings_source)
+        self.assertIn("prune_media_cache", settings_source)
+
+        cleaner_source = (ROOT / "cleaner.py").read_text(encoding="utf-8")
+        self.assertIn("Clock/Alarm 媒体缓存", cleaner_source)
+
 
 if __name__ == "__main__":
     unittest.main()
+

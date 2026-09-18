@@ -102,6 +102,88 @@ def _get_persistent_cache_dir() -> Path:
         return Path(tempfile.gettempdir())
 
 
+def get_media_cache_size(cache_dir: Path | None = None) -> int:
+    """Calculate the total size in bytes of all cached files in the persistent media cache."""
+    root = cache_dir if cache_dir is not None else _get_persistent_cache_dir()
+    if not root.exists() or not root.is_dir():
+        return 0
+    total = 0
+    try:
+        for p in root.iterdir():
+            if p.is_file():
+                try:
+                    total += p.stat().st_size
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return total
+
+
+def prune_media_cache(cache_dir: Path | None = None, max_bytes: int = 500 * 1024 * 1024) -> int:
+    """
+    LRU eviction: prune oldest cached media files if total cache exceeds max_bytes.
+    Prunes down to 80% of max_bytes to provide headroom and prevent frequent evictions.
+    Returns the number of bytes freed.
+    """
+    root = cache_dir if cache_dir is not None else _get_persistent_cache_dir()
+    if not root.exists() or not root.is_dir() or max_bytes <= 0:
+        return 0
+
+    formats = {'.mp4', '.mkv', '.webm', '.mov', '.avi', '.m4a', '.mp3', '.ogg', '.opus', '.wav', '.flac'}
+    files_info = []
+    total_bytes = 0
+    try:
+        for p in root.iterdir():
+            if p.is_file() and p.suffix.lower() in formats:
+                try:
+                    st = p.stat()
+                    total_bytes += st.st_size
+                    recent_time = max(getattr(st, "st_atime_ns", 0), getattr(st, "st_mtime_ns", 0))
+                    files_info.append((recent_time, st.st_size, p))
+                except OSError:
+                    pass
+    except OSError:
+        return 0
+
+    if total_bytes <= max_bytes:
+        return 0
+
+    target_bytes = int(max_bytes * 0.8)
+    files_info.sort(key=lambda item: item[0])
+    freed = 0
+    for _, sz, p in files_info:
+        if total_bytes - freed <= target_bytes:
+            break
+        try:
+            p.unlink(missing_ok=True)
+            freed += sz
+        except OSError:
+            pass
+    return freed
+
+
+def clear_media_cache(cache_dir: Path | None = None) -> int:
+    """Safely clear all media files in the persistent media cache. Returns bytes freed."""
+    root = cache_dir if cache_dir is not None else _get_persistent_cache_dir()
+    if not root.exists() or not root.is_dir():
+        return 0
+    freed = 0
+    formats = {'.mp4', '.mkv', '.webm', '.mov', '.avi', '.m4a', '.mp3', '.ogg', '.opus', '.wav', '.flac'}
+    try:
+        for p in root.iterdir():
+            if p.is_file() and (p.suffix.lower() in formats or p.name.startswith("media-")):
+                try:
+                    sz = p.stat().st_size
+                    p.unlink(missing_ok=True)
+                    freed += sz
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return freed
+
+
 # ─── Custom Playlist Delegate & Widget ─────────────────────────────────────
 
 class PlaylistItemDelegate(QStyledItemDelegate):
@@ -668,6 +750,10 @@ class YtDlpStreamWorker(QObject):
                                  and p.is_file() and p.stat().st_size > 0]
                 if existing_pers:
                     playable = max(existing_pers, key=lambda p: p.stat().st_mtime_ns)
+                    try:
+                        os.utime(playable, None)
+                    except Exception:
+                        pass
                     self._completed[key] = playable
                     return str(playable)
             except (NameError, Exception):
@@ -794,6 +880,10 @@ class YtDlpStreamWorker(QObject):
                     dest = persistent_root / playable.name
                     if not dest.exists() and persistent_root.is_dir():
                         shutil.copy2(playable, dest)
+                    media_cfg = self.state.get("media", {}) if isinstance(self.state, dict) else {}
+                    limit_mb = int(media_cfg.get("cache_limit_mb") or 500)
+                    limit_mb = max(50, min(10000, limit_mb))
+                    prune_media_cache(persistent_root, max_bytes=limit_mb * 1024 * 1024)
                 except Exception:
                     pass
             return str(playable)
