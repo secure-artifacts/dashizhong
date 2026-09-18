@@ -422,6 +422,21 @@ def _draw_youtube_icon(p, s, c):
 
 # ─── YtDlp Workers ────────────────────────────────────────────────────────
 
+def _find_node_path() -> str | None:
+    found = shutil.which("node")
+    if found:
+        return found
+    import os
+    for candidate in [
+        r"C:\Program Files\nodejs\node.exe",
+        r"C:\Program Files (x86)\nodejs\node.exe",
+        os.path.expanduser(r"~\AppData\Roaming\nvm\current\node.exe"),
+    ]:
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
 class YtDlpWorker(QObject):
     item_extracted = pyqtSignal(str, str)
     finished = pyqtSignal()
@@ -452,7 +467,7 @@ class YtDlpWorker(QObject):
                     'playlistend': max_items,
                     'socket_timeout': 15,
                 }
-                node_path = shutil.which("node")
+                node_path = _find_node_path()
                 if node_path:
                     ydl_opts['js_runtimes'] = {'node': {'path': node_path}}
                     ydl_opts['remote_components'] = {'ejs:github'}
@@ -691,7 +706,7 @@ class YtDlpStreamWorker(QObject):
             cookie_file = None
             try:
                 import os
-                node_path = shutil.which("node")
+                node_path = _find_node_path()
                 if node_path:
                     ydl_opts['js_runtimes'] = {'node': {'path': node_path}}
                     ydl_opts['remote_components'] = {'ejs:github'}
@@ -701,12 +716,24 @@ class YtDlpStreamWorker(QObject):
                 loc_dir = Path(os.environ.get("LOCALAPPDATA", "")) / "ClockAlarm"
                 target_cookie = loc_dir / "cookies.txt"
 
+                if not raw_cookies:
+                    try:
+                        state_p = loc_dir / "state.json"
+                        if state_p.is_file():
+                            import json
+                            s_data = json.loads(state_p.read_text(encoding="utf-8"))
+                            raw_cookies = (s_data.get("media", {}).get("cookies_text") or "").strip()
+                    except Exception:
+                        pass
+
                 if raw_cookies:
-                    loc_dir.mkdir(parents=True, exist_ok=True)
                     normalized = normalize_cookie_content(raw_cookies)
-                    target_cookie.write_text(normalized, encoding="utf-8")
-                    cookie_file = target_cookie
-                else:
+                    if normalized.strip():
+                        loc_dir.mkdir(parents=True, exist_ok=True)
+                        target_cookie.write_text(normalized, encoding="utf-8")
+                        cookie_file = target_cookie
+
+                if not cookie_file:
                     for cc in [
                         target_cookie,
                         loc_dir / "youtube_cookies.txt",
