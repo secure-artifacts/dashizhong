@@ -564,7 +564,7 @@ class YtDlpStreamWorker(QObject):
                 f'best[height<={limit}]/best'
             )
             ydl_opts = {
-                'extractor_args': {'youtube': {'player_client': ['android', 'web']}},
+                'extractor_args': {'youtube': {'player_client': ['ios', 'visionos', 'mweb', 'android', 'web']}},
                 'format': format_spec,
                 'quiet': True, 'no_warnings': True, 'noprogress': True,
                 'socket_timeout': 10, 'noplaylist': True,
@@ -588,9 +588,12 @@ class YtDlpStreamWorker(QObject):
                     ydl_opts['js_runtimes'] = {'node': {}}
                 for cc in [
                     Path(os.environ.get("LOCALAPPDATA", "")) / "ClockAlarm" / "cookies.txt",
+                    Path(os.environ.get("LOCALAPPDATA", "")) / "ClockAlarm" / "youtube_cookies.txt",
                     root / "cookies.txt",
                     Path(os.path.dirname(__file__)) / "cookies.txt",
+                    Path(os.path.dirname(__file__)) / "youtube_cookies.txt",
                     Path.cwd() / "cookies.txt",
+                    Path.cwd() / "youtube_cookies.txt",
                 ]:
                     if cc.is_file() and cc.stat().st_size > 0:
                         ydl_opts['cookiefile'] = str(cc)
@@ -603,8 +606,24 @@ class YtDlpStreamWorker(QObject):
                 ydl_opts['ffmpeg_location'] = imageio_ffmpeg.get_ffmpeg_exe()
             except Exception:
                 pass
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.extract_info(url, download=True)
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    ydl.extract_info(url, download=True)
+            except Exception as exc:
+                if cancel_event.is_set():
+                    return None
+                err_text = str(exc).lower()
+                # If 429 or bot check still occurs, try fallback client chain
+                if any(k in err_text for k in ("429", "too many requests", "not a bot", "sign in")):
+                    try:
+                        fallback_opts = dict(ydl_opts)
+                        fallback_opts['extractor_args'] = {'youtube': {'player_client': ['mweb', 'web_safari', 'ios', 'web']}}
+                        with yt_dlp.YoutubeDL(fallback_opts) as ydl_fb:
+                            ydl_fb.extract_info(url, download=True)
+                    except Exception:
+                        raise exc
+                else:
+                    raise
             if cancel_event.is_set():
                 return None
             # Never promote .part, metadata or unmerged .fNNN tracks to playback.
@@ -2489,7 +2508,12 @@ class MediaPlayerWindow(QWidget):
         is_bot_or_429 = any(k in short_detail.lower() for k in ("not a bot", "429", "too many requests", "sign in"))
         if is_bot_or_429:
             self.status_label.setText("播放失败：当前代理节点被 YouTube 拦截验证 (429/人机验证)，请在代理软件中切换其他节点")
-            self.status_label.setToolTip("YouTube 对当前代理节点触发了人机验证 (HTTP 429)。\n解决办法：请打开您的代理软件（如 v2rayN / Clash），切换至其他节点线路后再试。")
+            self.status_label.setToolTip(
+                "YouTube 对当前代理节点触发了人机验证 (HTTP 429)。\n"
+                "解决办法：\n"
+                "1. 在代理软件（如 v2rayN / Clash）中切换至其他节点线路。\n"
+                "2. 或在 %LOCALAPPDATA%\\ClockAlarm\\ 目录下放置导出的 cookies.txt，以登录身份免除拦截。"
+            )
             self.is_playing_state = False
             self.play_btn.setIcon(self._play_icon)
             self._media_retry_pending = False

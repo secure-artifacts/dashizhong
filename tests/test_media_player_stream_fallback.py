@@ -21,7 +21,8 @@ class MediaStreamFallbackTests(unittest.TestCase):
         source = SOURCE_PATH.read_text(encoding="utf-8")
         self.assertIn("_show_quality_menu", source)
         self.assertIn("_select_quality", source)
-        self.assertIn("player_client': ['android', 'web']", source)
+        self.assertIn("player_client': ['ios', 'visionos', 'mweb', 'android', 'web']", source)
+        self.assertIn("fallback_opts['extractor_args'] = {'youtube': {'player_client': ['mweb', 'web_safari', 'ios', 'web']}}", source)
 
 
 if __name__ == "__main__":
