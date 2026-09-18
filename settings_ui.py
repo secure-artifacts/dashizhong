@@ -890,14 +890,19 @@ class SettingsDialog(_StyledDialog):
             self.lbl_cookie_status.setStyleSheet("color: #94a3b8; font-size: 11px;")
             return
 
-        has_login = any(k in text for k in ("LOGIN_INFO", "SSID", "SAPISID", "SID", "APISID", "__Secure-3PSID"))
-        valid_lines = [l for l in text.splitlines() if l.strip() and not l.strip().startswith("#")]
+        from media_player_ui import normalize_cookie_content
+        norm = normalize_cookie_content(text)
+        has_login = any(k in norm for k in ("LOGIN_INFO", "SSID", "SAPISID", "SID", "APISID", "__Secure-3PSID"))
+        valid_lines = [l for l in norm.splitlines() if l.strip() and not l.strip().startswith("#")]
         if has_login:
-            self.lbl_cookie_status.setText("状态：已配置有效登录凭据")
+            self.lbl_cookie_status.setText(f"状态：已配置有效登录凭据 ({len(valid_lines)} 条)")
             self.lbl_cookie_status.setStyleSheet("color: #34d399; font-size: 11px; font-weight: 600;")
-        else:
-            self.lbl_cookie_status.setText(f"状态：已填入内容 ({len(valid_lines)} 条)")
+        elif valid_lines:
+            self.lbl_cookie_status.setText(f"状态：已解析 {len(valid_lines)} 条 Cookie")
             self.lbl_cookie_status.setStyleSheet("color: #38bdf8; font-size: 11px;")
+        else:
+            self.lbl_cookie_status.setText("状态：格式待识别")
+            self.lbl_cookie_status.setStyleSheet("color: #facc15; font-size: 11px;")
 
     def _import_cookie_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(

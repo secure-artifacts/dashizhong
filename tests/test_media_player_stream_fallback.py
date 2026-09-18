@@ -43,7 +43,12 @@ class MediaStreamFallbackTests(unittest.TestCase):
         norm = normalize_cookie_content(header_raw)
         self.assertIn("# Netscape HTTP Cookie File", norm)
         self.assertIn(".youtube.com\tTRUE\t/\tTRUE\t2147483647\tSID\tabc12345", norm)
-        self.assertIn(".google.com\tTRUE\t/\tTRUE\t2147483647\tSID\tabc12345", norm)
+
+        import base64
+        b64_raw = base64.b64encode(b'{"name": "LOGIN_INFO", "value": "b64token", "domain": ".youtube.com"}').decode()
+        norm = normalize_cookie_content(b64_raw)
+        self.assertIn("# Netscape HTTP Cookie File", norm)
+        self.assertIn("LOGIN_INFO\tb64token", norm)
 
     def test_settings_dialog_has_cookies_ui(self) -> None:
         settings_source = (ROOT / "settings_ui.py").read_text(encoding="utf-8")

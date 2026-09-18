@@ -452,6 +452,17 @@ class YtDlpWorker(QObject):
                     'playlistend': max_items,
                     'socket_timeout': 15,
                 }
+                node_path = shutil.which("node")
+                if node_path:
+                    ydl_opts['js_runtimes'] = {'node': {'path': node_path}}
+                    ydl_opts['remote_components'] = {'ejs:github'}
+                try:
+                    local_appdata = os.environ.get("LOCALAPPDATA", "")
+                    cfile = Path(local_appdata) / "ClockAlarm" / "cookies.txt"
+                    if cfile.is_file() and cfile.stat().st_size > 0:
+                        ydl_opts['cookiefile'] = str(cfile)
+                except Exception:
+                    pass
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     for url in urls:
                         if cancel_event.is_set() or emitted >= max_items:
@@ -499,7 +510,8 @@ class YtDlpWorker(QObject):
 def normalize_cookie_content(raw_text: str) -> str:
     """
     Normalizes pasted cookies into standard Netscape format expected by yt-dlp.
-    Supports Netscape format, JSON format (EditThisCookie), and raw HTTP Header 'Cookie: ...'.
+    Supports Netscape format, Base64-encoded cookies (Cookie-Editor export),
+    JSON format (EditThisCookie / Cookie-Editor), and raw HTTP Header 'Cookie: ...'.
     """
     raw_text = (raw_text or "").strip()
     if not raw_text:
@@ -511,51 +523,80 @@ def normalize_cookie_content(raw_text: str) -> str:
             raw_text = "# Netscape HTTP Cookie File\n" + raw_text
         return raw_text if raw_text.endswith("\n") else raw_text + "\n"
 
-    # Case 2: JSON format (EditThisCookie export)
-    if (raw_text.startswith("[") and raw_text.endswith("]")) or (raw_text.startswith("{") and raw_text.endswith("}")):
+    # Check for Base64 encoded payload (e.g. from Cookie-Editor / EditThisCookie export)
+    candidates = [raw_text]
+    clean_b64 = raw_text.replace("\r", "").replace("\n", "").strip()
+    if not any(c in clean_b64 for c in ("\t", " ", "<", ">")):
         try:
-            import json
-            data = json.loads(raw_text)
-            if isinstance(data, dict):
-                data = [data]
-            if isinstance(data, list):
-                lines = ["# Netscape HTTP Cookie File", "# Converted by ClockAlarm"]
-                for item in data:
-                    if isinstance(item, dict) and "name" in item and "value" in item:
-                        domain = item.get("domain") or ".youtube.com"
-                        flag = "TRUE" if str(domain).startswith(".") else "FALSE"
-                        path = item.get("path") or "/"
-                        secure = "TRUE" if item.get("secure", True) else "FALSE"
-                        expires = str(int(item.get("expirationDate") or 2147483647))
-                        name = str(item.get("name"))
-                        val = str(item.get("value"))
-                        lines.append(f"{domain}\t{flag}\t{path}\t{secure}\t{expires}\t{name}\t{val}")
-                if len(lines) > 2:
-                    return "\n".join(lines) + "\n"
+            import base64
+            pad = "=" * ((4 - len(clean_b64) % 4) % 4)
+            decoded_candidate = base64.b64decode(clean_b64 + pad).decode("utf-8", errors="ignore")
+            if any(k in decoded_candidate for k in ("domain", "name", "value", "LOGIN_INFO", "SID")):
+                candidates.insert(0, decoded_candidate)
         except Exception:
             pass
 
-    # Case 3: Raw HTTP header key=value; pairs
-    text = raw_text
-    if text.lower().startswith("cookie:"):
-        text = text[7:].strip()
+    for text in candidates:
+        text = text.strip()
+        # Case 2: JSON (array, single object, or semicolon/newline separated objects)
+        json_items = []
+        try:
+            import json
+            parsed = json.loads(text)
+            if isinstance(parsed, list):
+                json_items = parsed
+            elif isinstance(parsed, dict):
+                json_items = [parsed]
+        except Exception:
+            for segment in text.replace("\n", ";").split(";"):
+                segment = segment.strip()
+                if segment.startswith("{") and segment.endswith("}"):
+                    try:
+                        import json
+                        obj = json.loads(segment)
+                        if isinstance(obj, dict) and ("name" in obj or "value" in obj):
+                            json_items.append(obj)
+                    except Exception:
+                        pass
 
-    lines = ["# Netscape HTTP Cookie File", "# Converted from HTTP Header by ClockAlarm"]
-    pairs = [p.strip() for p in text.replace("\r", "").replace("\n", "").split(";") if p.strip()]
-    count = 0
-    for p in pairs:
-        if "=" in p:
-            name, val = p.split("=", 1)
-            name = name.strip()
-            val = val.strip()
-            if name:
-                count += 1
-                lines.append(f".youtube.com\tTRUE\t/\tTRUE\t2147483647\t{name}\t{val}")
-                if any(k in name for k in ("SID", "HSID", "SSID", "APISID", "SAPISID", "LOGIN_INFO", "__Secure")):
-                    lines.append(f".google.com\tTRUE\t/\tTRUE\t2147483647\t{name}\t{val}")
+        if json_items:
+            lines = ["# Netscape HTTP Cookie File", "# Converted by ClockAlarm"]
+            for item in json_items:
+                if isinstance(item, dict) and "name" in item and "value" in item:
+                    domain = item.get("domain") or ".youtube.com"
+                    flag = "TRUE" if str(domain).startswith(".") else "FALSE"
+                    path = item.get("path") or "/"
+                    secure = "TRUE" if item.get("secure", True) else "FALSE"
+                    try:
+                        exp_val = int(float(item.get("expirationDate") or 2147483647))
+                    except Exception:
+                        exp_val = 2147483647
+                    name = str(item.get("name")).strip()
+                    val = str(item.get("value")).strip()
+                    if name:
+                        lines.append(f"{domain}\t{flag}\t{path}\t{secure}\t{exp_val}\t{name}\t{val}")
+            if len(lines) > 2:
+                return "\n".join(lines) + "\n"
 
-    if count > 0:
-        return "\n".join(lines) + "\n"
+        # Case 3: Raw HTTP header key=value; pairs
+        h_text = text
+        if h_text.lower().startswith("cookie:"):
+            h_text = h_text[7:].strip()
+
+        lines = ["# Netscape HTTP Cookie File", "# Converted from HTTP Header by ClockAlarm"]
+        pairs = [p.strip() for p in h_text.replace("\r", "").replace("\n", "").split(";") if p.strip()]
+        count = 0
+        for p in pairs:
+            if "=" in p:
+                name, val = p.split("=", 1)
+                name = name.strip()
+                val = val.strip()
+                if name:
+                    count += 1
+                    lines.append(f".youtube.com\tTRUE\t/\tTRUE\t2147483647\t{name}\t{val}")
+
+        if count > 0:
+            return "\n".join(lines) + "\n"
 
     return raw_text if raw_text.endswith("\n") else raw_text + "\n"
 
@@ -650,8 +691,10 @@ class YtDlpStreamWorker(QObject):
             cookie_file = None
             try:
                 import os
-                if shutil.which("node"):
-                    ydl_opts['js_runtimes'] = {'node': {}}
+                node_path = shutil.which("node")
+                if node_path:
+                    ydl_opts['js_runtimes'] = {'node': {'path': node_path}}
+                    ydl_opts['remote_components'] = {'ejs:github'}
 
                 media_cfg = self.state.get("media", {}) if isinstance(self.state, dict) else {}
                 raw_cookies = (media_cfg.get("cookies_text") or "").strip()
@@ -681,8 +724,8 @@ class YtDlpStreamWorker(QObject):
 
             if cookie_file:
                 ydl_opts['cookiefile'] = str(cookie_file)
-                # When authenticated with user cookies, web client provides highest quality & no 429
-                ydl_opts['extractor_args'] = {'youtube': {'player_client': ['web', 'mweb', 'ios', 'android']}}
+                # When authenticated with user cookies and node solver, default/web extracts full quality & zero 429
+                ydl_opts['extractor_args'] = {'youtube': {'player_client': ['web', 'default']}}
             else:
                 ydl_opts['extractor_args'] = {'youtube': {'player_client': ['ios', 'visionos', 'mweb', 'android', 'web']}}
 
